@@ -13,7 +13,7 @@ android {
     minSdk = 29
     targetSdk = 36
     versionCode = 1
-    versionName = "1.0"
+    versionName = "1.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -76,6 +76,11 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+
+  // Google Play In-App Update
+  implementation("com.google.android.play:app-update:2.1.0")
+  implementation("com.google.android.play:app-update-ktx:2.1.0")
+  implementation(libs.okhttp)
 
   // Shizuku Privileged API
   implementation("dev.rikka.shizuku:api:13.1.5")

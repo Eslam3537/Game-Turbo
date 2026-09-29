@@ -362,6 +362,38 @@ fun AppleSettingsScreen(
                 )
             }
         }
+
+        // 6. IN-APP UPDATES & VERSION DETAILS
+        item {
+            AppleSectionHeader(
+                title = if (isRtl) "التحديثات وإصدار التطبيق" else "Updates & Version Details",
+                theme = theme
+            )
+        }
+
+        item {
+            AppleGroupedCard(theme = theme) {
+                AppleSettingsRow(
+                    title = if (isRtl) "فحص التحديثات (In-App Update)" else "Check for Updates",
+                    subtitle = if (isRtl) "الإصدار المثبت: v1.0.0 (كود: 1) • فحص رسمي عبر HTTPS وGoogle Play" else "Installed: v1.0.0 (Code: 1) • Verified via HTTPS & Play Store",
+                    icon = Icons.Default.SystemUpdate,
+                    iconTint = theme.accent,
+                    theme = theme,
+                    trailing = {
+                        Text(
+                            text = if (isRtl) "فحص الآن" else "Check",
+                            color = theme.accent,
+                            style = AppleTypography.footnote,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    onClick = {
+                        Toast.makeText(context, if (isRtl) "جاري فحص خوادم التحديث..." else "Checking update servers...", Toast.LENGTH_SHORT).show()
+                        com.example.engine.update.InAppUpdateManager.checkForUpdates(context, isUserInitiated = true)
+                    }
+                )
+            }
+        }
     }
 
     if (showShizukuGuide) {

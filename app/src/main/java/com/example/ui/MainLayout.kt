@@ -145,6 +145,15 @@ fun DashboardLayout(
                         onDismiss = { viewModel.dismissWarning() }
                     )
                 }
+
+                // In-App Update Dialog
+                val updateState by com.example.engine.update.InAppUpdateManager.dialogState.collectAsState()
+                if (updateState is com.example.engine.update.UpdateDialogState.Visible) {
+                    com.example.ui.components.InAppUpdateDialog(
+                        state = updateState as com.example.engine.update.UpdateDialogState.Visible,
+                        theme = theme
+                    )
+                }
             }
         }
     }

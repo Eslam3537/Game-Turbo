@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
         } catch (_: Throwable) {}
 
         requestAllStartupPermissions()
+        com.example.engine.update.InAppUpdateManager.checkForUpdates(this, isUserInitiated = false)
 
         setContent {
             MyApplicationTheme {
@@ -70,6 +71,7 @@ class MainActivity : ComponentActivity() {
         if (::viewModel.isInitialized) {
             viewModel.refreshPermissions()
         }
+        com.example.engine.update.InAppUpdateManager.checkForUpdates(this, isUserInitiated = false)
     }
 
     override fun onDestroy() {
