@@ -1,0 +1,95 @@
+<resources>
+    <string name="app_name">Game Turbo</string>
+    <string name="title_home">Home</string>
+    <string name="title_performance">Performance</string>
+    <string name="title_status">Optimization Status</string>
+    <string name="title_games">Games</string>
+    <string name="title_network">Network</string>
+    <string name="title_settings">Settings</string>
+    <string name="title_logs">System Logs</string>
+
+    <!-- Boost Button & Overall Status -->
+    <string name="boost_now">BOOST</string>
+    <string name="boost_active">ACTIVE</string>
+    <string name="boost_optimizing">Applying Optimizations...</string>
+    <string name="status_shizuku">Shizuku Service</string>
+    <string name="status_adb">ADB Service</string>
+    <string name="status_connection">Connection</string>
+    <string name="status_performance">Performance Mode</string>
+    <string name="status_ready">Ready</string>
+    <string name="status_optimized">Game Turbo Active</string>
+
+    <!-- State Values -->
+    <string name="state_running">RUNNING</string>
+    <string name="state_not_running">NOT RUNNING</string>
+    <string name="state_connected">CONNECTED</string>
+    <string name="state_disconnected">DISCONNECTED</string>
+    <string name="state_active">ACTIVE</string>
+    <string name="state_inactive">INACTIVE</string>
+    <string name="state_normal">NORMAL</string>
+    <string name="state_gaming">GAMING MODE</string>
+
+    <!-- Metrics Cards -->
+    <string name="metric_ram">RAM Usage</string>
+    <string name="metric_fps">Game FPS</string>
+    <string name="metric_temp">Temperature</string>
+    <string name="metric_cpu">CPU Load</string>
+    <string name="metric_gpu">GPU Draw</string>
+    <string name="metric_ping">Real Ping RTT</string>
+
+    <!-- Performance Actions -->
+    <string name="perf_title">Hardware Tuning Engines</string>
+    <string name="perf_cpu_title">CPU Core Governor</string>
+    <string name="perf_cpu_desc">Lock high-performance governor for sustained frame stability</string>
+    <string name="perf_gpu_title">GPU Graphics Priority</string>
+    <string name="perf_gpu_desc">Prioritize game graphics buffer rendering</string>
+    <string name="perf_memory_title">RAM Cache Trim</string>
+    <string name="perf_memory_desc">Trim background app caches to allocate memory for active game</string>
+    <string name="perf_touch_title">Pointer Speed &amp; Touch Response</string>
+    <string name="perf_touch_desc">Set pointer speed and reduce UI touch latency</string>
+
+    <!-- Games Screen -->
+    <string name="games_title">Game Library</string>
+    <string name="games_add_btn">Add Custom Game</string>
+    <string name="games_select_title">Select Game Profile</string>
+    <string name="games_perf_profile">Performance Profile</string>
+    <string name="games_net_profile">Network Profile</string>
+    <string name="games_touch_profile">Touch Profile</string>
+    <string name="games_launch">Launch Game</string>
+    <string name="games_hint">Launch any supported game to monitor performance and maintain stability.</string>
+
+    <!-- Network Screen -->
+    <string name="net_title">Gaming Network Engine</string>
+    <string name="net_optimize_btn">Optimize Network</string>
+    <string name="net_ping_optimal">Optimal Latency</string>
+    <string name="net_ping_moderate">Moderate Latency</string>
+    <string name="net_ping_high">Elevated Latency</string>
+    <string name="net_server_mideast">Middle East</string>
+    <string name="net_server_europe">Europe</string>
+    <string name="net_server_asia">Asia</string>
+    <string name="net_server_global">North America</string>
+    <string name="net_ping_avg">Average</string>
+    <string name="net_ping_best">Best</string>
+    <string name="net_ping_worst">Worst</string>
+
+    <!-- Restore Defaults -->
+    <string name="restore_btn">Restore Original Defaults</string>
+    <string name="restore_success">All verified snapshots restored to original state.</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">Booster Settings</string>
+    <string name="settings_lang_title">Interface Language</string>
+    <string name="settings_lang_desc">Switch application between Arabic &amp; English</string>
+    <string name="settings_dns_title">Encrypted Gaming DNS</string>
+    <string name="settings_dns_desc">Configure verified low-latency Private DNS host</string>
+    <string name="settings_auto_title">Foreground Game Detection</string>
+    <string name="settings_auto_desc">Automatically start session when a game enters foreground</string>
+    <string name="settings_launch_with_game_title">Floating Telemetry HUD</string>
+    <string name="settings_launch_with_game_desc">Show real-time SurfaceFlinger FPS &amp; battery temperature overlay</string>
+    <string name="settings_clean_logs">Clear Execution Logs</string>
+
+    <!-- Shizuku Pairing Guidelines Dialog -->
+    <string name="shizuku_pairing_title">Shizuku Privileged Access</string>
+    <string name="shizuku_pairing_desc">This app uses Shizuku to execute verified Android shell commands without root.\n\n1. Open Shizuku App and enable Wireless Debugging in Developer Options.\n2. Complete pairing with the provided pairing code.\n3. Start the Shizuku service.\n4. Grant Shizuku permission to Game Turbo.</string>
+    <string name="btn_close">Close</string>
+</resources>

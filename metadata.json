@@ -1,0 +1,6 @@
+{
+  "name": "Game Turbo",
+  "description": "Apple-inspired verified Game Turbo & PUBG performance optimizer with genuine Shizuku shell control, authentic hardware telemetry, and zero simulation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

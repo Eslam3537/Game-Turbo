@@ -1,0 +1,95 @@
+<resources>
+    <string name="app_name">Game Turbo</string>
+    <string name="title_home">الرئيسية</string>
+    <string name="title_performance">الأداء</string>
+    <string name="title_status">حالة التحسينات</string>
+    <string name="title_games">الألعاب</string>
+    <string name="title_network">الشبكة</string>
+    <string name="title_settings">الإعدادات</string>
+    <string name="title_logs">سجل الأوامر</string>
+
+    <!-- Boost Button & Overall Status -->
+    <string name="boost_now">تشغيل النمط</string>
+    <string name="boost_active">مفعل</string>
+    <string name="boost_optimizing">جاري تطبيق الإعدادات والتحقق...</string>
+    <string name="status_shizuku">خدمة Shizuku</string>
+    <string name="status_adb">خدمة ADB</string>
+    <string name="status_connection">الاتصال</string>
+    <string name="status_performance">نمط الأداء</string>
+    <string name="status_ready">جاهز</string>
+    <string name="status_optimized">Game Turbo قيد التشغيل</string>
+
+    <!-- State Values -->
+    <string name="state_running">قيد التشغيل</string>
+    <string name="state_not_running">غير مشغل</string>
+    <string name="state_connected">متصل</string>
+    <string name="state_disconnected">غير متصل</string>
+    <string name="state_active">نشط</string>
+    <string name="state_inactive">معطل</string>
+    <string name="state_normal">طبيعي</string>
+    <string name="state_gaming">نمط اللعب</string>
+
+    <!-- Metrics Cards -->
+    <string name="metric_ram">الذاكرة (RAM)</string>
+    <string name="metric_fps">معدل الإطارات (FPS)</string>
+    <string name="metric_temp">الحرارة</string>
+    <string name="metric_cpu">استهلاك المعالج</string>
+    <string name="metric_gpu">معالج الرسوميات</string>
+    <string name="metric_ping">زمن الاستجابة الحقيقي</string>
+
+    <!-- Performance Actions -->
+    <string name="perf_title">محركات ضبط العتاد</string>
+    <string name="perf_cpu_title">حاكم أنوية المعالج (CPU)</string>
+    <string name="perf_cpu_desc">تثبيت حاكم الأداء العالي لاستقرار الإطارات أثناء اللعب</string>
+    <string name="perf_gpu_title">أولوية معالجة الرسوميات (GPU)</string>
+    <string name="perf_gpu_desc">منح أولوية المعالجة لمخزن إطارات اللعبة النشطة</string>
+    <string name="perf_memory_title">تفريغ ذاكرة التخزين المؤقت (RAM)</string>
+    <string name="perf_memory_desc">تحرير الذاكرة المؤقتة للتطبيقات في الخلفية وتخصيصها للعبة</string>
+    <string name="perf_touch_title">سرعة المؤشر واستجابة اللمس</string>
+    <string name="perf_touch_desc">ضبط سرعة المؤشر وتقليل مهلة معالجة حركات اللمس</string>
+
+    <!-- Games Screen -->
+    <string name="games_title">مكتبة الألعاب</string>
+    <string name="games_add_btn">إضافة لعبة مخصصة</string>
+    <string name="games_select_title">تحديد ملف اللعبة</string>
+    <string name="games_perf_profile">ملف الأداء</string>
+    <string name="games_net_profile">ملف الشبكة</string>
+    <string name="games_touch_profile">ملف استجابة اللمس</string>
+    <string name="games_launch">تشغيل اللعبة</string>
+    <string name="games_hint">شغّل اللعبة لمراقبة الأداء الحقيقي والتحكم في استقرار الإطارات والحرارة.</string>
+
+    <!-- Network Screen -->
+    <string name="net_title">محرك استقرار الشبكة</string>
+    <string name="net_optimize_btn">تطبيق إعدادات الشبكة</string>
+    <string name="net_ping_optimal">استجابة ممتازة</string>
+    <string name="net_ping_moderate">استجابة متوسطة</string>
+    <string name="net_ping_high">استجابة مرتفعة</string>
+    <string name="net_server_mideast">الشرق الأوسط</string>
+    <string name="net_server_europe">أوروبا</string>
+    <string name="net_server_asia">آسيا</string>
+    <string name="net_server_global">أمريكا الشمالية</string>
+    <string name="net_ping_avg">المتوسط</string>
+    <string name="net_ping_best">الأفضل</string>
+    <string name="net_ping_worst">الأسوأ</string>
+
+    <!-- Restore Defaults -->
+    <string name="restore_btn">استعادة الإعدادات الأصلية</string>
+    <string name="restore_success">تمت استعادة كافة الإعدادات الأصلية المسجلة بنجاح.</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">إعدادات التطبيق</string>
+    <string name="settings_lang_title">لغة الواجهة</string>
+    <string name="settings_lang_desc">التبديل بين العربية والإنجليزية</string>
+    <string name="settings_dns_title">مزود DNS المشفر للألعاب</string>
+    <string name="settings_dns_desc">تعيين مزود DNS منخفض التأخير والتحقق من التطبيق</string>
+    <string name="settings_auto_title">الكشف التلقائي عن تشغيل اللعبة</string>
+    <string name="settings_auto_desc">تفعيل جلسة التحسين تلقائياً عند فتح اللعبة في الواجهة</string>
+    <string name="settings_launch_with_game_title">شاشة المراقبة العائمة (Overlay)</string>
+    <string name="settings_launch_with_game_desc">عرض معدل إطارات SurfaceFlinger الحقيقي وحرارة البطارية فوق اللعبة</string>
+    <string name="settings_clean_logs">مسح سجل الأوامر</string>
+
+    <!-- Shizuku Pairing Guidelines Dialog -->
+    <string name="shizuku_pairing_title">صلاحيات Shizuku المتقدمة</string>
+    <string name="shizuku_pairing_desc">يستخدم التطبيق Shizuku لتنفيذ أوامر بيئة أندرويد الحقيقية بدون روت.\n\n1. افتح تطبيق Shizuku وفعّل التصحيح اللاسلكي من خيارات المطور.\n2. اربط الجهاز باستخدام رمز الإقران.\n3. ابدأ تشغيل خدمة Shizuku.\n4. امنح الإذن لتطبيق Game Turbo.</string>
+    <string name="btn_close">إغلاق</string>
+</resources>
