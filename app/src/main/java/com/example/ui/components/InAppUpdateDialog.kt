@@ -74,14 +74,15 @@ fun InAppUpdateDialog(
                 Box(
                     modifier = Modifier
                         .size(64.dp)
-                        .clip(RoundedCornerShape(16.dp))
+                        .clip(RoundedCornerShape(18.dp))
                         .background(theme.accent.copy(alpha = 0.15f)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Image(
-                        painter = painterResource(id = R.mipmap.ic_launcher),
-                        contentDescription = "App Icon",
-                        modifier = Modifier.size(52.dp)
+                    Icon(
+                        imageVector = Icons.Default.SystemUpdate,
+                        contentDescription = "Update Icon",
+                        tint = theme.accent,
+                        modifier = Modifier.size(34.dp)
                     )
                 }
 
