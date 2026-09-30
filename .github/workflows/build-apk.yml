@@ -114,8 +114,12 @@ jobs:
         run: |
           echo "=== Verifying GitHub CLI ==="
           gh --version
-          RELEASE_TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
-          RELEASE_TITLE="Debug APK Build #${{ github.run_number }}"
+          VERSION_NAME=$(grep -E 'versionName\s*=\s*' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME="1.0.0"
+          fi
+          RELEASE_TAG="v$VERSION_NAME"
+          RELEASE_TITLE="Game Turbo v$VERSION_NAME"
           ASSET_FILE="${{ steps.prepare_asset.outputs.asset_path }}"
 
           if [ ! -f "$ASSET_FILE" ] || [ ! -s "$ASSET_FILE" ]; then
@@ -124,13 +128,12 @@ jobs:
           fi
 
           NOTES=$(cat <<EOF
-          ### Debug APK Automated Build
+          ### Game Turbo v$VERSION_NAME Release
           - **Build System:** GitHub Actions
+          - **Version:** v$VERSION_NAME
           - **Run Number:** #${{ github.run_number }}
-          - **Run Attempt:** ${{ github.run_attempt }}
           - **Source Commit:** ${{ github.sha }}
-          - **Signing:** Temporary debug keystore
-          - **Note:** This APK is intended for testing and verification.
+          - **Signing:** Debug Keystore
           EOF
           )
 
@@ -139,7 +142,7 @@ jobs:
             --title "$RELEASE_TITLE" \
             --notes "$NOTES" \
             --target "${{ github.sha }}" \
-            --latest
+            --latest || gh release upload "$RELEASE_TAG" "$ASSET_FILE" --clobber
 
       - name: Report APK download result
         if: always()

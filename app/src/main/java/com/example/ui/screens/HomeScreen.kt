@@ -99,7 +99,7 @@ fun AppleHomeScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = if (isRtl) "جيم تربو" else "Game Turbo",
+                            text = "Game Turbo",
                             style = AppleTypography.displayMedium,
                             color = theme.textPrimary,
                             fontWeight = FontWeight.ExtraBold

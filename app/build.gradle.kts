@@ -12,8 +12,9 @@ android {
     applicationId = "com.aistudio.gameturbo.kxmpzq"
     minSdk = 29
     targetSdk = 36
-    versionCode = 2
-    versionName = "1.0.1"
+    // مع كل تحديث: زوّد versionCode بـ 1 وعدّل versionName
+    versionCode = 1
+    versionName = "1.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

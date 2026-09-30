@@ -374,9 +374,9 @@ fun AppleSettingsScreen(
         item {
             AppleGroupedCard(theme = theme) {
                 AppleSettingsRow(
-                    title = if (isRtl) "تحديثات تطبيق جيم تربو" else "Game Turbo App Updates",
-                    subtitle = if (isRtl) "الإصدار المثبت: v${com.example.BuildConfig.VERSION_NAME} (كود: ${com.example.BuildConfig.VERSION_CODE}) • انقر للتحقق من وجود تحديث جديد"
-                        else "Installed: v${com.example.BuildConfig.VERSION_NAME} (Code: ${com.example.BuildConfig.VERSION_CODE}) • Tap to check for updates",
+                    title = "Game Turbo v${com.example.BuildConfig.VERSION_NAME}",
+                    subtitle = if (isRtl) "الإصدار الحالي مثبت • انقر للتحقق من وجود تحديث عبر GitHub"
+                        else "Current version installed • Tap to check for updates via GitHub",
                     icon = Icons.Default.SystemUpdate,
                     iconTint = theme.accent,
                     theme = theme,
