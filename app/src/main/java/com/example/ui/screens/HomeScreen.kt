@@ -631,7 +631,7 @@ fun AppleHomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
-                                text = if (isRtl) "شاشة حالة التحسينات" else "Optimization Status Screen",
+                                text = if (isRtl) "تقرير الحقيقة (Reality Report)" else "Reality Report",
                                 style = AppleTypography.titleSmall,
                                 color = theme.textPrimary,
                                 fontWeight = FontWeight.Bold
@@ -643,7 +643,7 @@ fun AppleHomeScreen(
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
-                                    text = if (isRtl) "فحص حي" else "LIVE",
+                                    text = if (isRtl) "فحص ذاتي" else "SELF-TEST",
                                     style = AppleTypography.caption,
                                     color = theme.accentBlue,
                                     fontSize = 9.sp,
@@ -652,8 +652,8 @@ fun AppleHomeScreen(
                             }
                         }
                         Text(
-                            text = if (isRtl) "فحص واقعي وتأكيد النتيجة الفعلية لكل ميزة في النظام مع إمكانية نسخ التقرير"
-                            else "Inspect real execution status, verify system responses, and export diagnostic report",
+                            text = if (isRtl) "فحص وتشخيص ذاتي حي لكل ميزة وأمر في التطبيق مع إظهار الأوامر والنتائج الحقيقية ونسخ التقرير"
+                            else "Inspect real execution status, verify system responses, and export full reality report",
                             style = AppleTypography.footnote,
                             color = theme.textSecondary,
                             maxLines = 2,

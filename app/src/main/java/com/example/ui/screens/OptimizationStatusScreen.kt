@@ -74,14 +74,14 @@ fun AppleOptimizationStatusScreen(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = if (isRtl) "حالة التحسينات" else "Optimization Status",
+                        text = if (isRtl) "تقرير الحقيقة (Reality Report)" else "Reality Report",
                         style = AppleTypography.displayMedium,
                         color = theme.textPrimary,
                         fontWeight = FontWeight.ExtraBold
                     )
                     Text(
-                        text = if (isRtl) "فحص وتشخيص حي لكل ميزة ينفذها التطبيق للتأكد من استجابة النظام الحقيقية"
-                        else "Real-time diagnostic verification of every feature executed by the app",
+                        text = if (isRtl) "فحص وتشخيص حي لكل ميزة وأمر ينفذه التطبيق للتأكد من استجابة النظام الحقيقية وإظهار النتائج ورموز الأخطاء بدقة"
+                        else "In-app self-test verifying every feature, exact shell command, exit code, and live system response",
                         style = AppleTypography.footnote,
                         color = theme.textSecondary
                     )

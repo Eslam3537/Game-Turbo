@@ -374,6 +374,28 @@ fun AppleSettingsScreen(
         item {
             AppleGroupedCard(theme = theme) {
                 AppleSettingsRow(
+                    title = if (isRtl) "تقرير الحقيقة (Reality Report)" else "Reality Report Self-Test",
+                    subtitle = if (isRtl) "فحص وتشخيص ذاتي حي لكل ميزة وأمر في التطبيق مع إظهار الأوامر والنتائج ونسخ التقرير"
+                        else "In-app self-test verifying every command, exit code, and live system response",
+                    icon = Icons.Default.FactCheck,
+                    iconTint = theme.accentBlue,
+                    theme = theme,
+                    trailing = {
+                        Text(
+                            text = if (isRtl) "فتح التقرير" else "Open",
+                            color = theme.accentBlue,
+                            style = AppleTypography.footnote,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    onClick = {
+                        viewModel.setScreen("status")
+                    }
+                )
+
+                HorizontalDivider(color = theme.divider, thickness = 0.5.dp)
+
+                AppleSettingsRow(
                     title = "Game Turbo v${com.example.BuildConfig.VERSION_NAME}",
                     subtitle = if (isRtl) "الإصدار الحالي مثبت • انقر للتحقق من وجود تحديث عبر GitHub"
                         else "Current version installed • Tap to check for updates via GitHub",
@@ -392,6 +414,103 @@ fun AppleSettingsScreen(
                         Toast.makeText(context, if (isRtl) "جاري الاتصال بمستودع GitHub..." else "Connecting to GitHub repository...", Toast.LENGTH_SHORT).show()
                         com.example.engine.update.InAppUpdateManager.checkForUpdates(context, isUserInitiated = true)
                     }
+                )
+            }
+        }
+
+        // About Developer & Credits Section
+        item {
+            AppleSectionHeader(
+                title = if (isRtl) "حول التطبيق والمطور" else "About Developer & Credits",
+                theme = theme
+            )
+        }
+
+        item {
+            AppleGroupedCard(theme = theme) {
+                // Developer Name
+                AppleSettingsRow(
+                    title = if (isRtl) "المطور" else "Developer",
+                    subtitle = "إسلام رمضان ربيع (Eslam Ramadan)",
+                    icon = Icons.Default.Person,
+                    iconTint = theme.accent,
+                    theme = theme,
+                    trailing = {},
+                    onClick = {}
+                )
+
+                HorizontalDivider(color = theme.divider, thickness = 0.5.dp)
+
+                // Facebook
+                AppleSettingsRow(
+                    title = if (isRtl) "فيسبوك (Facebook)" else "Facebook",
+                    subtitle = "facebook.com/share/1CeNDG6hML",
+                    icon = Icons.Default.Share,
+                    iconTint = Color(0xFF1877F2),
+                    theme = theme,
+                    trailing = {
+                        Text(
+                            text = if (isRtl) "زيارة" else "Visit",
+                            color = Color(0xFF1877F2),
+                            style = AppleTypography.footnote,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    onClick = {
+                        try {
+                            val intent = android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse("https://www.facebook.com/share/1CeNDG6hML/")
+                            ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) }
+                            context.startActivity(intent)
+                        } catch (e: Throwable) {
+                            Toast.makeText(context, "Error opening link: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                )
+
+                HorizontalDivider(color = theme.divider, thickness = 0.5.dp)
+
+                // WhatsApp
+                AppleSettingsRow(
+                    title = if (isRtl) "واتساب (WhatsApp)" else "WhatsApp",
+                    subtitle = "wa.me/qr/K7C6TJZJIS72H1",
+                    icon = Icons.Default.Chat,
+                    iconTint = Color(0xFF25D366),
+                    theme = theme,
+                    trailing = {
+                        Text(
+                            text = if (isRtl) "تواصل" else "Chat",
+                            color = Color(0xFF25D366),
+                            style = AppleTypography.footnote,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    onClick = {
+                        try {
+                            val intent = android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse("https://wa.me/qr/K7C6TJZJIS72H1")
+                            ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) }
+                            context.startActivity(intent)
+                        } catch (e: Throwable) {
+                            Toast.makeText(context, "Error opening WhatsApp: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                )
+
+                HorizontalDivider(color = theme.divider, thickness = 0.5.dp)
+
+                // Zero Ads & Transparency Guarantee
+                AppleSettingsRow(
+                    title = if (isRtl) "تطبيق مجاني 100% وخالٍ من الإعلانات" else "100% Free & Ad-Free",
+                    subtitle = if (isRtl) "تطبيق حقيقي بالكامل بدون أي بيانات وهمية أو قياسات مصطنعة، صُمم لدعم اللاعبين والمستخدمين مجاناً."
+                        else "100% authentic utility with zero fake measurements or simulated behavior. Free and ad-free.",
+                    icon = Icons.Default.Verified,
+                    iconTint = theme.accent,
+                    theme = theme,
+                    trailing = {},
+                    onClick = {}
                 )
             }
         }

@@ -91,6 +91,7 @@ class GameSessionManager(
     private var baselineRtt: Int? = null
     private var baselineJitter: Int? = null
     private var baselineTemp: Double? = null
+    private val sessionRttSamples = mutableListOf<Int>()
 
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
 
@@ -146,13 +147,24 @@ class GameSessionManager(
         activeGamePackage = gamePackage
         activeGameName = gameName
 
-        // 1. Establish real baselines
+        // 1. Establish real baselines with 10 real samples
         networkEngine.start()
         frameMonitor.start()
         thermalEngine.startMonitoring()
+        sessionRttSamples.clear()
 
-        val rttInitial = networkEngine.sampleRtt()
-        baselineRtt = rttInitial
+        val baselineSamples = mutableListOf<Int>()
+        for (i in 0 until 10) {
+            networkEngine.sampleRtt()?.let { baselineSamples.add(it) }
+            delay(80)
+        }
+        val medianBaseline = if (baselineSamples.isNotEmpty()) {
+            val sorted = baselineSamples.sorted()
+            sorted[sorted.size / 2]
+        } else {
+            networkEngine.sampleRtt()
+        }
+        baselineRtt = medianBaseline
         baselineJitter = networkEngine.networkProfile.value.jitterMs
         baselineTemp = thermalEngine.thermalState.value.batteryTempCelsius
 
@@ -258,7 +270,11 @@ class GameSessionManager(
         sessionJob?.cancel()
         sessionJob = scope.launch {
             while (isActive && _sessionState.value == GameSessionState.RUNNING) {
-                networkEngine.sampleRtt()
+                val rtt = networkEngine.sampleRtt()
+                if (rtt != null) {
+                    sessionRttSamples.add(rtt)
+                    if (sessionRttSamples.size > 50) sessionRttSamples.removeAt(0)
+                }
                 thermalEngine.refresh()
                 val currentFps = GameFpsSampler.sampleGameFps(activeGamePackage)
 
@@ -266,11 +282,23 @@ class GameSessionManager(
                 val therm = thermalEngine.thermalState.value
                 val durationSec = (System.currentTimeMillis() - sessionStartTime) / 1000
 
-                // Statistically meaningful verdict requires >= 5 samples
+                // Statistically meaningful verdict requires >= 10 real samples
                 val verdict = when {
-                    net.samplesCount < 5 -> "COLLECTING_DATA"
-                    net.avgRttMs != null && baselineRtt != null && net.avgRttMs < (baselineRtt!! - 4) -> "MEASURED_IMPROVEMENT"
-                    net.avgRttMs != null && baselineRtt != null && net.avgRttMs > (baselineRtt!! + 8) -> "ELEVATED_LATENCY"
+                    sessionRttSamples.size < 10 -> "INSUFFICIENT_DATA"
+                    baselineRtt != null -> {
+                        val sortedSession = sessionRttSamples.sorted()
+                        val sessionMedian = sortedSession[sortedSession.size / 2]
+                        val baseMed = baselineRtt!!
+                        val baseJitter = baselineJitter ?: 5
+                        val threshold = maxOf((baseMed * 0.10).toInt(), 2 * baseJitter).coerceAtLeast(3)
+                        if (baseMed - sessionMedian >= threshold) {
+                            "MEASURED_IMPROVEMENT"
+                        } else if (sessionMedian - baseMed >= threshold) {
+                            "ELEVATED_LATENCY"
+                        } else {
+                            "NO_SIGNIFICANT_CHANGE"
+                        }
+                    }
                     else -> "MEASURED_STABLE"
                 }
 
@@ -335,9 +363,21 @@ class GameSessionManager(
 
         if (existing != null) {
             val verdict = when {
-                net.samplesCount < 5 -> "INSUFFICIENT_DATA"
-                net.avgRttMs != null && baselineRtt != null && net.avgRttMs < (baselineRtt!! - 4) -> "MEASURED_IMPROVEMENT"
-                net.avgRttMs != null && baselineRtt != null && net.avgRttMs > (baselineRtt!! + 8) -> "ELEVATED_LATENCY"
+                sessionRttSamples.size < 10 -> "INSUFFICIENT_DATA"
+                baselineRtt != null -> {
+                    val sortedSession = sessionRttSamples.sorted()
+                    val sessionMedian = sortedSession[sortedSession.size / 2]
+                    val baseMed = baselineRtt!!
+                    val baseJitter = baselineJitter ?: 5
+                    val threshold = maxOf((baseMed * 0.10).toInt(), 2 * baseJitter).coerceAtLeast(3)
+                    if (baseMed - sessionMedian >= threshold) {
+                        "MEASURED_IMPROVEMENT"
+                    } else if (sessionMedian - baseMed >= threshold) {
+                        "ELEVATED_LATENCY"
+                    } else {
+                        "NO_SIGNIFICANT_CHANGE"
+                    }
+                }
                 else -> "MEASURED_STABLE"
             }
             boosterDao.updateSession(

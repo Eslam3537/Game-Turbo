@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
 
         val database = BoosterDatabase.getDatabase(this)
         val repository = BoosterRepository(database.boosterDao())
+        com.example.data.ExecutionRecorder.init(database.boosterDao())
         val viewModelFactory = BoosterViewModelFactory(application, repository)
         viewModel = ViewModelProvider(this, viewModelFactory)[BoosterViewModel::class.java]
 

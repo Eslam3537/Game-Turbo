@@ -527,7 +527,7 @@ fun AppleFloatingTabBar(
     val tabs = listOf(
         Triple("home", if (isRtl) "الرئيسية" else "Home", Icons.Default.Dashboard),
         Triple("performance", if (isRtl) "الأداء" else "Performance", Icons.Default.Speed),
-        Triple("status", if (isRtl) "حالة التحسينات" else "Status", Icons.Default.FactCheck),
+        Triple("status", if (isRtl) "تقرير الحقيقة" else "Reality Report", Icons.Default.FactCheck),
         Triple("network", if (isRtl) "الشبكة" else "Network", Icons.Default.Wifi),
         Triple("thermal", if (isRtl) "الحرارة" else "Thermal", Icons.Default.Thermostat),
         Triple("games", if (isRtl) "الألعاب" else "Games", Icons.Default.SportsEsports),

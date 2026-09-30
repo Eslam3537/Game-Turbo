@@ -112,7 +112,7 @@ class FloatingMonitorService : Service() {
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("Floating FPS & Temp Monitor")
             .setContentText("Monitoring live SurfaceFlinger FPS & Hardware Temperature")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(com.example.R.mipmap.ic_launcher)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

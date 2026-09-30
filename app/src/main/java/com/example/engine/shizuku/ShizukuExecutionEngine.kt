@@ -69,17 +69,17 @@ class ShizukuExecutionEngine(
                 originalValue = "N/A",
                 appliedValue = "N/A",
                 verifiedValue = "UNSUPPORTED",
-                errorMessage = "Setting key not found on this device firmware"
+                errorMessage = "Setting key not found or unsupported on this device firmware"
             )
         }
 
-        // 2. Read original state before first modification
+        // 2. Read current state
         val targetVal = targetValueOverride ?: command.defaultTargetValue
-        val originalRead = AdbCommandRunner.run(command.readCurrentCommand(gamePkg))?.trim()
-        val isAbsent = originalRead.isNullOrBlank() || originalRead == "null"
-        val originalVal = originalRead ?: ""
+        val currentRead = AdbCommandRunner.run(command.readCurrentCommand(gamePkg))?.trim()
+        val isAbsent = currentRead.isNullOrBlank() || currentRead == "null"
+        val currentVal = currentRead ?: ""
 
-        // 3. Snapshot original state in Room (NEVER overwrite existing snapshot with modified value!)
+        // 3. Snapshot management (Rule 2.3: Avoid stale snapshots)
         val existingSnapshot = boosterDao.getSnapshot(command.id)
         if (existingSnapshot == null) {
             boosterDao.insertSnapshot(
@@ -87,15 +87,35 @@ class ShizukuExecutionEngine(
                     commandId = command.id,
                     settingNamespace = "system",
                     settingKey = command.id,
-                    originalValue = originalVal,
+                    originalValue = currentVal,
                     isAbsentOriginally = isAbsent,
                     appliedValue = targetVal
                 )
             )
-            Log.d(TAG, "Snapshotted original state for [${command.id}]: '$originalVal' (absent=$isAbsent)")
+            Log.d(TAG, "Snapshotted original state for [${command.id}]: '$currentVal' (absent=$isAbsent)")
+        } else {
+            // If current value equals the snapshot's applied value, system is still modified -> keep true original!
+            // If current value differs, user or system changed it outside our session -> update original to new current value.
+            if (currentVal != existingSnapshot.appliedValue) {
+                boosterDao.insertSnapshot(
+                    existingSnapshot.copy(
+                        originalValue = currentVal,
+                        isAbsentOriginally = isAbsent,
+                        appliedValue = targetVal,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+                Log.d(TAG, "Updated snapshot for [${command.id}] with new original: '$currentVal'")
+            }
         }
 
-        // 4. Apply change
+        // 4. For memory actions, sample MemAvailable before
+        var memBefore = 0L
+        if (command.id == "ram_clean") {
+            memBefore = extractMemAvailableKb(currentVal)
+        }
+
+        // 5. Apply change
         val applyCmd = command.applyCommand(gamePkg, targetVal)
         val execResult = AdbCommandRunner.runDetailed(applyCmd)
         if (!execResult.success) {
@@ -104,27 +124,51 @@ class ShizukuExecutionEngine(
                 commandId = command.id,
                 isSupported = true,
                 isSuccess = false,
-                originalValue = originalVal,
+                originalValue = currentVal,
                 appliedValue = targetVal,
                 verifiedValue = "FAILED",
                 errorMessage = execResult.stderr.ifBlank { "Exit code ${execResult.exitCode}" }
             )
         }
 
-        // 5. Read-back verification
+        // 6. Read-back verification (exact match)
         val verifiedRead = AdbCommandRunner.run(command.readCurrentCommand(gamePkg))?.trim() ?: ""
-        val isVerified = command.verifyPredicate(verifiedRead, targetVal)
+
+        var isVerified = false
+        var verifyError: String? = null
+
+        if (command.id == "ram_clean") {
+            val memAfter = extractMemAvailableKb(verifiedRead)
+            val memDeltaKb = memAfter - memBefore
+            // Check if command succeeded and if delta was measurable
+            isVerified = execResult.success
+            if (memDeltaKb <= 0 && isVerified) {
+                Log.d(TAG, "ram_clean executed: delta=${memDeltaKb}KB (no measurable memory freed)")
+            }
+        } else {
+            isVerified = command.verifyPredicate(verifiedRead, targetVal)
+            if (!isVerified) {
+                verifyError = "Verification failed: expected '$targetVal' but read back '$verifiedRead'"
+            }
+        }
+
         Log.d(TAG, "Verify [${command.id}]: expected='$targetVal', got='$verifiedRead', verified=$isVerified")
 
         CommandExecutionResult(
             commandId = command.id,
             isSupported = true,
             isSuccess = isVerified,
-            originalValue = originalVal,
+            originalValue = currentVal,
             appliedValue = targetVal,
             verifiedValue = verifiedRead,
-            errorMessage = if (!isVerified) "Verification failed: expected '$targetVal' but read back '$verifiedRead'" else null
+            errorMessage = verifyError
         )
+    }
+
+    private fun extractMemAvailableKb(memInfoText: String): Long {
+        val line = memInfoText.lines().firstOrNull { it.startsWith("MemAvailable:") } ?: return 0L
+        val parts = line.split("\\s+".toRegex())
+        return parts.getOrNull(1)?.toLongOrNull() ?: 0L
     }
 
     /**
@@ -152,13 +196,13 @@ class ShizukuExecutionEngine(
                 if (res.success) {
                     restoredCount++
                     boosterDao.deleteSnapshot(snapshot.commandId)
-                    Log.d(TAG, "Restored [${snapshot.commandId}] to '${snapshot.originalValue}'")
+                    Log.d(TAG, "Restored [${snapshot.commandId}] to '${snapshot.originalValue}' (wasAbsent=${snapshot.isAbsentOriginally})")
                 } else {
                     Log.e(TAG, "Failed rolling back [${snapshot.commandId}]: ${res.stderr}")
                     failed.add(snapshot.commandId)
                 }
             } else {
-                // Unknown command definition, remove snapshot to prevent dangling
+                // If unknown setting key, remove snapshot
                 boosterDao.deleteSnapshot(snapshot.commandId)
             }
         }

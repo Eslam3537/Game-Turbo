@@ -2,7 +2,11 @@
     <string name="app_name">Game Turbo</string>
     <string name="title_home">الرئيسية</string>
     <string name="title_performance">الأداء</string>
-    <string name="title_status">حالة التحسينات</string>
+    <string name="title_status">تقرير الحقيقة</string>
+    <string name="title_reality_report">تقرير الحقيقة</string>
+    <string name="reality_report_desc">فحص وتشخيص ذاتي حي لكل ميزة وأمر في التطبيق مع إظهار الأوامر والنتائج ونسخ التقرير</string>
+    <string name="developer_name">إسلام رمضان ربيع</string>
+    <string name="developer_title">حول التطبيق والمطور</string>
     <string name="title_games">الألعاب</string>
     <string name="title_network">الشبكة</string>
     <string name="title_settings">الإعدادات</string>
