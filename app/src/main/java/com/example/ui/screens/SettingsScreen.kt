@@ -374,8 +374,9 @@ fun AppleSettingsScreen(
         item {
             AppleGroupedCard(theme = theme) {
                 AppleSettingsRow(
-                    title = if (isRtl) "فحص التحديثات (In-App Update)" else "Check for Updates",
-                    subtitle = if (isRtl) "الإصدار المثبت: v1.0.0 (كود: 1) • فحص رسمي عبر HTTPS وGoogle Play" else "Installed: v1.0.0 (Code: 1) • Verified via HTTPS & Play Store",
+                    title = if (isRtl) "تحديثات تطبيق جيم تربو" else "Game Turbo App Updates",
+                    subtitle = if (isRtl) "الإصدار المثبت: v${com.example.BuildConfig.VERSION_NAME} (كود: ${com.example.BuildConfig.VERSION_CODE}) • انقر للتحقق من وجود تحديث جديد"
+                        else "Installed: v${com.example.BuildConfig.VERSION_NAME} (Code: ${com.example.BuildConfig.VERSION_CODE}) • Tap to check for updates",
                     icon = Icons.Default.SystemUpdate,
                     iconTint = theme.accent,
                     theme = theme,
@@ -388,7 +389,7 @@ fun AppleSettingsScreen(
                         )
                     },
                     onClick = {
-                        Toast.makeText(context, if (isRtl) "جاري فحص خوادم التحديث..." else "Checking update servers...", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, if (isRtl) "جاري الاتصال بمستودع GitHub..." else "Connecting to GitHub repository...", Toast.LENGTH_SHORT).show()
                         com.example.engine.update.InAppUpdateManager.checkForUpdates(context, isUserInitiated = true)
                     }
                 )

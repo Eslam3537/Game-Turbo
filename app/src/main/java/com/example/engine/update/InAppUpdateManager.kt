@@ -116,7 +116,9 @@ object InAppUpdateManager {
                     payload = fetchFromGitHubReleasesApi(currentName)
                 }
 
-                if (payload != null && payload.versionCode > currentCode) {
+                val hasUpdate = payload != null && isUpdateAvailable(currentCode, currentName, payload)
+
+                if (hasUpdate && payload != null) {
                     // Update available! Show Dialog
                     _dialogState.value = UpdateDialogState.Visible(
                         updatePayload = payload,
@@ -124,10 +126,11 @@ object InAppUpdateManager {
                         currentVersionName = currentName
                     )
                 } else {
+                    _dialogState.value = UpdateDialogState.Hidden
                     if (isUserInitiated) {
-                        showToastOnMain(appContext, "أنت تستخدم أحدث إصدار بالفعل (v$currentName)")
+                        showToastOnMain(appContext, "التطبيق محدث إلى آخر إصدار (v$currentName)")
                     }
-                    Log.d(TAG, "App is up to date: local=$currentCode")
+                    Log.d(TAG, "App is up to date: local=$currentCode, currentName=$currentName")
                 }
             } catch (e: Throwable) {
                 Log.e(TAG, "Update check error: ${e.message}", e)
@@ -136,6 +139,19 @@ object InAppUpdateManager {
                 }
             }
         }
+    }
+
+    private fun isUpdateAvailable(currentCode: Long, currentName: String, payload: RemoteUpdatePayload): Boolean {
+        val cleanCurrent = currentName.trim().removePrefix("v").removePrefix("V")
+        val cleanRemote = payload.versionName.trim().removePrefix("v").removePrefix("V")
+
+        // If the version names match exactly (e.g. 1.0.1 == 1.0.1), no update is needed
+        if (cleanCurrent.isNotBlank() && cleanCurrent.equals(cleanRemote, ignoreCase = true)) {
+            return false
+        }
+
+        // Only update if remote versionCode is strictly higher than current
+        return payload.versionCode > currentCode
     }
 
     private fun fetchFromRawManifest(currentVersionName: String): RemoteUpdatePayload? {
@@ -249,8 +265,18 @@ object InAppUpdateManager {
     }
 
     private fun extractVersionCodeFromTag(tag: String): Long {
-        val digits = tag.filter { it.isDigit() }
-        return digits.toLongOrNull() ?: 2L
+        val buildMatch = Regex("build[_-](\\d+)").find(tag)
+        if (buildMatch != null) {
+            return buildMatch.groupValues[1].toLongOrNull() ?: 2L
+        }
+        val semverMatch = Regex("(\\d+)\\.(\\d+)\\.(\\d+)").find(tag)
+        if (semverMatch != null) {
+            val major = semverMatch.groupValues[1].toLongOrNull() ?: 1L
+            val minor = semverMatch.groupValues[2].toLongOrNull() ?: 0L
+            val patch = semverMatch.groupValues[3].toLongOrNull() ?: 0L
+            return major * 10000 + minor * 100 + patch
+        }
+        return 2L
     }
 
     /**

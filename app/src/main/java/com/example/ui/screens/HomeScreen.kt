@@ -94,12 +94,30 @@ fun AppleHomeScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text(
-                        text = if (isRtl) "Game Turbo" else "Game Turbo",
-                        style = AppleTypography.displayMedium,
-                        color = theme.textPrimary,
-                        fontWeight = FontWeight.ExtraBold
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = if (isRtl) "جيم تربو" else "Game Turbo",
+                            style = AppleTypography.displayMedium,
+                            color = theme.textPrimary,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(AppleRadius.pill),
+                            color = theme.accent.copy(alpha = 0.15f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, theme.accent.copy(alpha = 0.35f))
+                        ) {
+                            Text(
+                                text = "v${com.example.BuildConfig.VERSION_NAME}",
+                                color = theme.accent,
+                                style = AppleTypography.footnote,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                     Text(
                         text = if (isRtl) "نظام تحسين الأداء ومراقبة العتاد الحقيقي" else "Hardware Telemetry & Performance OS",
                         style = AppleTypography.footnote,
