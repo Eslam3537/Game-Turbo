@@ -34,6 +34,13 @@ class ExampleRobolectricTest {
     org.junit.Assert.assertTrue("1.0.1 must be greater than 1.0.0", v101!! > v100!!)
     org.junit.Assert.assertFalse("Same version must NOT be greater", v100 > v100)
     org.junit.Assert.assertTrue("2.0.0 must be greater than 1.0.1", vV200!! > v101)
+
+    // Test whole-number versioning (v1, v2, v3)
+    val v1 = com.example.engine.update.InAppUpdateManager.parseSemVer("1")
+    val v2 = com.example.engine.update.InAppUpdateManager.parseSemVer("v2")
+    org.junit.Assert.assertNotNull(v1)
+    org.junit.Assert.assertNotNull(v2)
+    org.junit.Assert.assertTrue("v2 must be greater than v1", v2!! > v1!!)
   }
 
   @Test

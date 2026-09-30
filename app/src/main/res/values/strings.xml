@@ -7,6 +7,7 @@
     <string name="reality_report_desc">In-app self-test verifying every command, exit code, and live system response</string>
     <string name="developer_name">Eslam Ramadan Rabie</string>
     <string name="developer_title">About Developer &amp; Credits</string>
+    <string name="settings_version_label">Version</string>
     <string name="title_games">Games</string>
     <string name="title_network">Network</string>
     <string name="title_settings">Settings</string>

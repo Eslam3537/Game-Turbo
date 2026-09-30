@@ -1,0 +1,154 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify Version and Tag Match
+        id: verify_version
+        run: |
+          echo "=== Step 1: Validating version.properties and tag ==="
+          if [ ! -f "version.properties" ]; then
+            echo "::error::Missing version.properties file in repository root!"
+            exit 1
+          fi
+
+          # Extract APP_VERSION from version.properties
+          APP_VERSION=$(grep -E '^APP_VERSION=' version.properties | cut -d '=' -f 2 | tr -d '[:space:]')
+
+          if [ -z "$APP_VERSION" ]; then
+            echo "::error::APP_VERSION not found or empty in version.properties!"
+            exit 1
+          fi
+
+          # Ensure APP_VERSION is a positive integer
+          if ! [[ "$APP_VERSION" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::APP_VERSION '$APP_VERSION' is not a valid positive integer!"
+            exit 1
+          fi
+
+          EXPECTED_TAG="v$APP_VERSION"
+          PUSHED_TAG="${GITHUB_REF#refs/tags/}"
+
+          echo "Detected APP_VERSION : $APP_VERSION"
+          echo "Expected git tag     : $EXPECTED_TAG"
+          echo "Pushed git tag       : $PUSHED_TAG"
+
+          if [ "$PUSHED_TAG" != "$EXPECTED_TAG" ]; then
+            echo "::error::Pushed tag '$PUSHED_TAG' does not match version.properties APP_VERSION ('$EXPECTED_TAG')! Tag mismatch rejected."
+            exit 1
+          fi
+
+          echo "app_version=$APP_VERSION" >> $GITHUB_OUTPUT
+          echo "release_title=Game Turbo v$APP_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Decode and Validate Release Keystore
+        id: keystore_prep
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "=== Step 2: Validating Release Keystore and Secrets ==="
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Required secret 'KEYSTORE_BASE64' is missing in repository secrets!"
+            exit 1
+          fi
+          if [ -z "$STORE_PASSWORD" ]; then
+            echo "::error::Required secret 'STORE_PASSWORD' is missing in repository secrets!"
+            exit 1
+          fi
+          if [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Required secret 'KEY_PASSWORD' is missing in repository secrets!"
+            exit 1
+          fi
+
+          KEYSTORE_DIR=$(mktemp -d)
+          KEYSTORE_PATH="$KEYSTORE_DIR/release-upload.jks"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
+
+          if [ ! -s "$KEYSTORE_PATH" ]; then
+            echo "::error::Failed to decode KEYSTORE_BASE64 or resultant keystore file is empty!"
+            exit 1
+          fi
+
+          echo "Keystore decoded successfully to $KEYSTORE_PATH"
+          echo "keystore_path=$KEYSTORE_PATH" >> $GITHUB_OUTPUT
+
+      - name: Build Release APK
+        env:
+          KEYSTORE_PATH: ${{ steps.keystore_prep.outputs.keystore_path }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "=== Step 3: Compiling Release APK with Gradle ==="
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Verify Release APK Output
+        id: find_apk
+        run: |
+          echo "=== Step 4: Verifying Release APK Output ==="
+          APP_VER="${{ steps.verify_version.outputs.app_version }}"
+
+          # Locate the release APK produced by the build
+          APK_PATH=$(find app/build/outputs/apk/release -type f -name "*.apk" | head -n 1)
+
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "::error::Build completed but no release APK file was found in app/build/outputs/apk/release!"
+            exit 1
+          fi
+
+          echo "Found release APK: $APK_PATH"
+          FILE_SIZE=$(stat -c%s "$APK_PATH")
+          echo "APK file size: $FILE_SIZE bytes"
+
+          if [ "$FILE_SIZE" -lt 1000000 ]; then
+            echo "::error::APK file size ($FILE_SIZE bytes) is suspiciously small. Aborting release."
+            exit 1
+          fi
+
+          # Target asset name: Game-Turbo-v<APP_VERSION>.apk
+          ASSET_NAME="Game-Turbo-v${APP_VER}.apk"
+          ASSET_PATH="app/build/outputs/apk/release/$ASSET_NAME"
+
+          if [ "$APK_PATH" != "$ASSET_PATH" ]; then
+            echo "Copying $APK_PATH to $ASSET_PATH for standardized release asset naming..."
+            cp "$APK_PATH" "$ASSET_PATH"
+          fi
+
+          echo "apk_asset_path=$ASSET_PATH" >> $GITHUB_OUTPUT
+          echo "apk_asset_name=$ASSET_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.verify_version.outputs.release_title }}
+          tag_name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: ${{ steps.find_apk.outputs.apk_asset_path }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true

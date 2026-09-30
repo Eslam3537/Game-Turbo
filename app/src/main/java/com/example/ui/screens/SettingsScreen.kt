@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,6 +42,15 @@ fun AppleSettingsScreen(
     val permissionsStatus by viewModel.permissionsState.collectAsState()
     val shizukuActive by viewModel.shizukuActive.collectAsState()
     var showShizukuGuide by remember { mutableStateOf(false) }
+
+    val runtimeVersionName = remember(context) {
+        try {
+            val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+            pInfo.versionName ?: "1"
+        } catch (_: Throwable) {
+            "1"
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -396,7 +406,7 @@ fun AppleSettingsScreen(
                 HorizontalDivider(color = theme.divider, thickness = 0.5.dp)
 
                 AppleSettingsRow(
-                    title = "Game Turbo v${com.example.BuildConfig.VERSION_NAME}",
+                    title = "Game Turbo v$runtimeVersionName",
                     subtitle = if (isRtl) "الإصدار الحالي مثبت • انقر للتحقق من وجود تحديث عبر GitHub"
                         else "Current version installed • Tap to check for updates via GitHub",
                     icon = Icons.Default.SystemUpdate,
@@ -428,6 +438,19 @@ fun AppleSettingsScreen(
 
         item {
             AppleGroupedCard(theme = theme) {
+                // App Version (dynamically read from PackageManager)
+                AppleSettingsRow(
+                    title = stringResource(id = com.example.R.string.settings_version_label),
+                    subtitle = "Game Turbo v$runtimeVersionName",
+                    icon = Icons.Default.Info,
+                    iconTint = theme.accent,
+                    theme = theme,
+                    trailing = {},
+                    onClick = {}
+                )
+
+                HorizontalDivider(color = theme.divider, thickness = 0.5.dp)
+
                 // Developer Name
                 AppleSettingsRow(
                     title = if (isRtl) "المطور" else "Developer",

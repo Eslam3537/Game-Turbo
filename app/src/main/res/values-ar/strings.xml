@@ -7,6 +7,7 @@
     <string name="reality_report_desc">فحص وتشخيص ذاتي حي لكل ميزة وأمر في التطبيق مع إظهار الأوامر والنتائج ونسخ التقرير</string>
     <string name="developer_name">إسلام رمضان ربيع</string>
     <string name="developer_title">حول التطبيق والمطور</string>
+    <string name="settings_version_label">الإصدار</string>
     <string name="title_games">الألعاب</string>
     <string name="title_network">الشبكة</string>
     <string name="title_settings">الإعدادات</string>
