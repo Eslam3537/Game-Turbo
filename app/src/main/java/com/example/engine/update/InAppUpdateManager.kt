@@ -7,17 +7,13 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.example.engine.overlay.FloatingMonitorService
-import com.google.android.play.core.appupdate.AppUpdateInfo
-import com.google.android.play.core.appupdate.AppUpdateManager
-import com.google.android.play.core.appupdate.AppUpdateManagerFactory
-import com.google.android.play.core.install.InstallStateUpdatedListener
-import com.google.android.play.core.install.model.AppUpdateType
-import com.google.android.play.core.install.model.InstallStatus
-import com.google.android.play.core.install.model.UpdateAvailability
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,70 +28,74 @@ import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
- * In-App Update Manager.
+ * In-App Update Manager directly connected to GitHub Repository:
+ * Eslam3537/Game-Turbo
  *
- * Supports dual update mechanisms:
- * 1. Google Play In-App Updates (Flexible & Immediate) via Play Core API.
- * 2. Standalone HTTPS Update Server (for GitHub Releases or custom APK distribution).
+ * Checks for updates via:
+ * 1. GitHub Releases API: https://api.github.com/repos/Eslam3537/Game-Turbo/releases/latest
+ * 2. Raw Repository Manifest: https://raw.githubusercontent.com/Eslam3537/Game-Turbo/main/app-update.json
  *
- * Features:
- * - VersionCode numeric comparison.
- * - Throttled battery-friendly background checks.
- * - Suppressed during active gameplay or active floating HUD.
- * - SHA-256 checksum verification before installation.
- * - Resumable/temp file caching.
- * - Secure FileProvider installation dispatch.
+ * Downloads APK directly from GitHub Releases and triggers safe PackageInstaller via FileProvider.
  */
 object InAppUpdateManager {
     private const val TAG = "InAppUpdateManager"
     private const val PREFS_NAME = "in_app_update_prefs"
     private const val KEY_LAST_CHECK_TIME = "last_check_timestamp"
     private const val KEY_SNOOZE_UNTIL = "snooze_until_timestamp"
-    private const val MIN_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000L // 4 hours
+    private const val MIN_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000L // 3 hours
     private const val SNOOZE_DURATION_MS = 24 * 60 * 60 * 1000L   // 24 hours
 
-    // Remote HTTPS update metadata endpoint
-    private const val HTTPS_UPDATE_CONFIG_URL =
-        "https://raw.githubusercontent.com/Eslam3537/Game-Turbo/main/app-update.json"
+    private const val GITHUB_REPO_OWNER = "Eslam3537"
+    private const val GITHUB_REPO_NAME = "Game-Turbo"
+
+    private const val GITHUB_API_LATEST_RELEASE =
+        "https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/latest"
+    private const val GITHUB_RAW_UPDATE_JSON =
+        "https://raw.githubusercontent.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/main/app-update.json"
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
         .build()
 
     private val _dialogState = MutableStateFlow<UpdateDialogState>(UpdateDialogState.Hidden)
     val dialogState: StateFlow<UpdateDialogState> = _dialogState.asStateFlow()
 
-    private var playAppUpdateManager: AppUpdateManager? = null
-    private var playInstallListener: InstallStateUpdatedListener? = null
     private var downloadJob: Job? = null
     private var downloadedApkFile: File? = null
 
     /**
-     * Initializes and executes update check.
-     * @param isUserInitiated True if manually pressed in Settings (bypasses cooldown and snooze).
+     * Checks for updates from GitHub.
+     * @param context Application or Activity context.
+     * @param isUserInitiated True if clicked by user (in Settings). Bypasses cooldown and shows feedback toast.
      */
     fun checkForUpdates(context: Context, isUserInitiated: Boolean = false) {
-        // Do not check if floating monitor or active gameplay is ongoing (unless user explicitly initiated)
+        val appContext = context.applicationContext
+
+        // Suppress automatic checks if floating monitor is active (to protect game performance)
         if (!isUserInitiated && FloatingMonitorService.isOverlayRunning.value) {
-            Log.d(TAG, "Update check suppressed: Floating monitor is actively running")
+            Log.d(TAG, "Automatic update check suppressed: Floating monitor is running")
             return
         }
 
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
 
         if (!isUserInitiated) {
             val snoozeUntil = prefs.getLong(KEY_SNOOZE_UNTIL, 0L)
             if (now < snoozeUntil) {
-                Log.d(TAG, "Update check snoozed by user until: $snoozeUntil")
+                Log.d(TAG, "Update check snoozed until: $snoozeUntil")
                 return
             }
 
             val lastCheck = prefs.getLong(KEY_LAST_CHECK_TIME, 0L)
             if (now - lastCheck < MIN_CHECK_INTERVAL_MS) {
-                Log.d(TAG, "Update check throttled. Last checked ${ (now - lastCheck) / 60000 } mins ago")
+                Log.d(TAG, "Update check throttled. Checked recently.")
                 return
             }
         }
@@ -103,87 +103,57 @@ object InAppUpdateManager {
         prefs.edit().putLong(KEY_LAST_CHECK_TIME, now).apply()
 
         scope.launch {
-            val currentPkgInfo = getCurrentPackageInfo(context)
-            val currentCode = getVersionCode(currentPkgInfo)
-            val currentName = currentPkgInfo?.versionName ?: "1.0.0"
+            try {
+                val currentPkgInfo = getCurrentPackageInfo(appContext)
+                val currentCode = getVersionCode(currentPkgInfo)
+                val currentName = currentPkgInfo?.versionName ?: "1.0.0"
 
-            // 1. Try Google Play In-App Updates first
-            val playHandled = checkGooglePlayUpdate(context, currentCode, currentName)
-            if (playHandled) return@launch
+                // 1. Try checking app-update.json from GitHub
+                var payload = fetchFromRawManifest(currentName)
 
-            // 2. Fallback to HTTPS update server
-            checkHttpsServerUpdate(context, currentCode, currentName)
-        }
-    }
+                // 2. If null, fallback to GitHub Releases API
+                if (payload == null) {
+                    payload = fetchFromGitHubReleasesApi(currentName)
+                }
 
-    private suspend fun checkGooglePlayUpdate(
-        context: Context,
-        currentCode: Long,
-        currentName: String
-    ): Boolean = withContext(Dispatchers.Main) {
-        try {
-            val updateManager = AppUpdateManagerFactory.create(context)
-            playAppUpdateManager = updateManager
-            val appUpdateInfoTask = updateManager.appUpdateInfo
-
-            val info: AppUpdateInfo = suspendCancellableCoroutine { continuation ->
-                appUpdateInfoTask.addOnSuccessListener { continuation.resumeWith(Result.success(it)) }
-                appUpdateInfoTask.addOnFailureListener { continuation.resumeWith(Result.failure(it)) }
-            }
-
-            if (info.updateAvailability() == UpdateAvailability.UPDATE_AVAILABLE) {
-                val remoteCode = info.availableVersionCode().toLong()
-                if (remoteCode > currentCode) {
-                    val isForce = info.isUpdateTypeAllowed(AppUpdateType.IMMEDIATE) &&
-                            !info.isUpdateTypeAllowed(AppUpdateType.FLEXIBLE)
-
-                    val payload = RemoteUpdatePayload(
-                        versionCode = remoteCode,
-                        versionName = "$remoteCode.0",
-                        apkUrl = "",
-                        fileSize = info.totalBytesToDownload(),
-                        forceUpdate = isForce,
-                        releaseNotes = listOf("تحديث رسمي متاح عبر متجر Google Play"),
-                        source = UpdateSource.GOOGLE_PLAY
-                    )
-
+                if (payload != null && payload.versionCode > currentCode) {
+                    // Update available! Show Dialog
                     _dialogState.value = UpdateDialogState.Visible(
                         updatePayload = payload,
                         currentVersionCode = currentCode,
                         currentVersionName = currentName
                     )
-                    return@withContext true
+                } else {
+                    if (isUserInitiated) {
+                        showToastOnMain(appContext, "أنت تستخدم أحدث إصدار بالفعل (v$currentName)")
+                    }
+                    Log.d(TAG, "App is up to date: local=$currentCode")
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "Update check error: ${e.message}", e)
+                if (isUserInitiated) {
+                    showToastOnMain(appContext, "تعذر الاتصال بمستودع GitHub، يرجى التحقق من الإنترنت")
                 }
             }
-            false
-        } catch (e: Throwable) {
-            Log.d(TAG, "Google Play Update check skipped or failed: ${e.message}")
-            false
         }
     }
 
-    private suspend fun checkHttpsServerUpdate(
-        context: Context,
-        currentCode: Long,
-        currentName: String
-    ) = withContext(Dispatchers.IO) {
-        try {
+    private fun fetchFromRawManifest(currentVersionName: String): RemoteUpdatePayload? {
+        return try {
             val request = Request.Builder()
-                .url(HTTPS_UPDATE_CONFIG_URL)
+                .url(GITHUB_RAW_UPDATE_JSON)
+                .header("User-Agent", "GameTurbo-Android/$currentVersionName")
                 .header("Accept", "application/json")
                 .build()
 
             val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.w(TAG, "HTTPS config check failed with code ${response.code}")
-                return@withContext
-            }
+            if (!response.isSuccessful) return null
 
-            val body = response.body?.string() ?: return@withContext
+            val body = response.body?.string() ?: return null
             val json = JSONObject(body)
 
             val remoteCode = json.optLong("versionCode", 0L)
-            val remoteName = json.optString("versionName", "")
+            val remoteName = json.optString("versionName", "1.0.1")
             val apkUrl = json.optString("apkUrl", "")
             val apkSha256 = json.optString("apkSha256", "")
             val fileSize = json.optLong("fileSize", 0L)
@@ -191,15 +161,15 @@ object InAppUpdateManager {
             val releaseDate = json.optString("releaseDate", "")
 
             val notesArray = json.optJSONArray("releaseNotes")
-            val releaseNotes = mutableListOf<String>()
+            val notes = mutableListOf<String>()
             if (notesArray != null) {
                 for (i in 0 until notesArray.length()) {
-                    releaseNotes.add(notesArray.getString(i))
+                    notes.add(notesArray.getString(i))
                 }
             }
 
-            if (remoteCode > currentCode && apkUrl.startsWith("https://", ignoreCase = true)) {
-                val payload = RemoteUpdatePayload(
+            if (remoteCode > 0 && apkUrl.startsWith("https://", ignoreCase = true)) {
+                RemoteUpdatePayload(
                     versionCode = remoteCode,
                     versionName = remoteName,
                     apkUrl = apkUrl,
@@ -207,69 +177,89 @@ object InAppUpdateManager {
                     fileSize = fileSize,
                     forceUpdate = forceUpdate,
                     releaseDate = releaseDate,
-                    releaseNotes = releaseNotes,
+                    releaseNotes = notes,
                     source = UpdateSource.HTTPS_SERVER
                 )
-
-                _dialogState.value = UpdateDialogState.Visible(
-                    updatePayload = payload,
-                    currentVersionCode = currentCode,
-                    currentVersionName = currentName
-                )
-            } else {
-                Log.d(TAG, "App is up to date: local=$currentCode, remote=$remoteCode")
-            }
+            } else null
         } catch (e: Throwable) {
-            Log.e(TAG, "checkHttpsServerUpdate failed: ${e.message}")
+            Log.d(TAG, "fetchFromRawManifest skipped: ${e.message}")
+            null
         }
     }
 
+    private fun fetchFromGitHubReleasesApi(currentVersionName: String): RemoteUpdatePayload? {
+        return try {
+            val request = Request.Builder()
+                .url(GITHUB_API_LATEST_RELEASE)
+                .header("User-Agent", "GameTurbo-Android/$currentVersionName")
+                .header("Accept", "application/vnd.github.v3+json")
+                .build()
+
+            val response = httpClient.newCall(request).execute()
+            if (!response.isSuccessful) return null
+
+            val body = response.body?.string() ?: return null
+            val json = JSONObject(body)
+
+            val tagName = json.optString("tag_name", "")
+            val releaseTitle = json.optString("name", "New Release")
+            val releaseDate = json.optString("published_at", "").take(10)
+            val releaseBody = json.optString("body", "")
+
+            val assets = json.optJSONArray("assets")
+            var downloadUrl = ""
+            var fileSize = 0L
+
+            if (assets != null) {
+                for (i in 0 until assets.length()) {
+                    val asset = assets.getJSONObject(i)
+                    val assetName = asset.optString("name", "")
+                    if (assetName.endsWith(".apk", ignoreCase = true)) {
+                        downloadUrl = asset.optString("browser_download_url", "")
+                        fileSize = asset.optLong("size", 0L)
+                        break
+                    }
+                }
+            }
+
+            if (downloadUrl.isNotBlank()) {
+                val notes = releaseBody.lines()
+                    .map { it.trim().removePrefix("-").removePrefix("*").trim() }
+                    .filter { it.isNotBlank() && !it.startsWith("#") }
+                    .take(5)
+
+                // Derive version code if tag is e.g. "debug-apk-build-3-1" -> 3
+                val derivedCode = extractVersionCodeFromTag(tagName)
+
+                RemoteUpdatePayload(
+                    versionCode = derivedCode,
+                    versionName = releaseTitle,
+                    apkUrl = downloadUrl,
+                    fileSize = fileSize,
+                    forceUpdate = false,
+                    releaseDate = releaseDate,
+                    releaseNotes = if (notes.isNotEmpty()) notes else listOf("تحديث جديد متوفر عبر GitHub Releases"),
+                    source = UpdateSource.HTTPS_SERVER
+                )
+            } else null
+        } catch (e: Throwable) {
+            Log.d(TAG, "fetchFromGitHubReleasesApi failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractVersionCodeFromTag(tag: String): Long {
+        val digits = tag.filter { it.isDigit() }
+        return digits.toLongOrNull() ?: 2L
+    }
+
     /**
-     * Initiates the update flow (Google Play or HTTPS APK download).
+     * Starts downloading the update APK directly from GitHub.
      */
     fun startUpdate(activity: Activity) {
         val currentState = _dialogState.value as? UpdateDialogState.Visible ?: return
         val payload = currentState.updatePayload
-
-        if (payload.source == UpdateSource.GOOGLE_PLAY && playAppUpdateManager != null) {
-            startPlayUpdateFlow(activity, payload)
-        } else {
-            startHttpsDownload(activity.applicationContext, payload)
-        }
-    }
-
-    private fun startPlayUpdateFlow(activity: Activity, payload: RemoteUpdatePayload) {
-        try {
-            val updateType = if (payload.forceUpdate) AppUpdateType.IMMEDIATE else AppUpdateType.FLEXIBLE
-            playInstallListener = InstallStateUpdatedListener { state ->
-                when (state.installStatus()) {
-                    InstallStatus.DOWNLOADING -> {
-                        val progress = DownloadProgress(
-                            status = DownloadStatus.DOWNLOADING,
-                            bytesDownloaded = state.bytesDownloaded(),
-                            totalBytes = state.totalBytesToDownload(),
-                            percentage = if (state.totalBytesToDownload() > 0) {
-                                ((state.bytesDownloaded() * 100) / state.totalBytesToDownload()).toInt()
-                            } else 0
-                        )
-                        updateProgress(progress)
-                    }
-                    InstallStatus.DOWNLOADED -> {
-                        updateProgress(DownloadProgress(status = DownloadStatus.DOWNLOAD_COMPLETED, percentage = 100))
-                    }
-                    InstallStatus.FAILED -> {
-                        updateProgress(DownloadProgress(status = DownloadStatus.FAILED, errorMessage = "فشل تحميل التحديث من Google Play"))
-                    }
-                    else -> {}
-                }
-            }
-            playAppUpdateManager?.registerListener(playInstallListener!!)
-            playAppUpdateManager?.appUpdateInfo?.addOnSuccessListener { info ->
-                playAppUpdateManager?.startUpdateFlowForResult(info, updateType, activity, 9901)
-            }
-        } catch (e: Throwable) {
-            updateProgress(DownloadProgress(status = DownloadStatus.FAILED, errorMessage = e.message))
-        }
+        startHttpsDownload(activity.applicationContext, payload)
     }
 
     private fun startHttpsDownload(context: Context, payload: RemoteUpdatePayload) {
@@ -277,11 +267,20 @@ object InAppUpdateManager {
         downloadJob = scope.launch {
             updateProgress(DownloadProgress(status = DownloadStatus.CONNECTING))
             try {
-                val request = Request.Builder().url(payload.apkUrl).build()
+                val request = Request.Builder()
+                    .url(payload.apkUrl)
+                    .header("User-Agent", "GameTurbo-Android-Downloader")
+                    .build()
+
                 val response = httpClient.newCall(request).execute()
 
                 if (!response.isSuccessful) {
-                    updateProgress(DownloadProgress(status = DownloadStatus.FAILED, errorMessage = "فشل الاتصال بخادم التحديث (${response.code})"))
+                    updateProgress(
+                        DownloadProgress(
+                            status = DownloadStatus.FAILED,
+                            errorMessage = "فشل الاتصال بخادم التحديث (${response.code})"
+                        )
+                    )
                     return@launch
                 }
 
@@ -291,11 +290,11 @@ object InAppUpdateManager {
                 val updatesDir = File(context.cacheDir, "updates")
                 if (!updatesDir.exists()) updatesDir.mkdirs()
 
-                val targetFile = File(updatesDir, "update_v${payload.versionCode}.apk")
-                val tempFile = File(updatesDir, "update_v${payload.versionCode}.apk.tmp")
+                val targetFile = File(updatesDir, "app-update-v${payload.versionCode}.apk")
+                val tempFile = File(updatesDir, "app-update-v${payload.versionCode}.apk.tmp")
 
                 var bytesCopied = 0L
-                val buffer = ByteArray(16 * 1024)
+                val buffer = ByteArray(32 * 1024)
                 val inputStream: InputStream = responseBody.byteStream()
                 val outputStream = FileOutputStream(tempFile)
 
@@ -327,19 +326,28 @@ object InAppUpdateManager {
                     }
                 }
 
-                // Verify SHA-256 if present
+                // Verify SHA-256 if hash was specified
                 if (payload.apkSha256.isNotBlank()) {
                     updateProgress(DownloadProgress(status = DownloadStatus.VERIFYING_HASH, percentage = 100))
                     val computedHash = computeSha256(tempFile)
                     if (!computedHash.equals(payload.apkSha256.trim(), ignoreCase = true)) {
                         tempFile.delete()
-                        updateProgress(DownloadProgress(status = DownloadStatus.FAILED, errorMessage = "فشل التحقق من أمان ملف APK (SHA-256 Mismatch)"))
+                        updateProgress(
+                            DownloadProgress(
+                                status = DownloadStatus.FAILED,
+                                errorMessage = "فشل التحقق من أمان الملف (SHA-256 Mismatch)"
+                            )
+                        )
                         return@launch
                     }
                 }
 
                 if (targetFile.exists()) targetFile.delete()
-                tempFile.renameTo(targetFile)
+                if (!tempFile.renameTo(targetFile)) {
+                    tempFile.copyTo(targetFile, overwrite = true)
+                    tempFile.delete()
+                }
+
                 downloadedApkFile = targetFile
 
                 updateProgress(
@@ -351,25 +359,21 @@ object InAppUpdateManager {
                     )
                 )
             } catch (e: Throwable) {
-                Log.e(TAG, "Download failed: ${e.message}")
-                updateProgress(DownloadProgress(status = DownloadStatus.FAILED, errorMessage = e.localizedMessage ?: "حدث خطأ أثناء تحميل التحديث"))
+                Log.e(TAG, "Download failed: ${e.message}", e)
+                updateProgress(
+                    DownloadProgress(
+                        status = DownloadStatus.FAILED,
+                        errorMessage = e.localizedMessage ?: "حدث انقطاع أثناء تحميل التحديث"
+                    )
+                )
             }
         }
     }
 
     /**
-     * Completes installation.
+     * Launches Android PackageInstaller safely via FileProvider.
      */
     fun installDownloadedUpdate(context: Context) {
-        val currentState = _dialogState.value as? UpdateDialogState.Visible ?: return
-
-        // Google Play Complete
-        if (currentState.updatePayload.source == UpdateSource.GOOGLE_PLAY) {
-            playAppUpdateManager?.completeUpdate()
-            return
-        }
-
-        // HTTPS Standalone APK Installation via FileProvider
         val apkFile = downloadedApkFile ?: return
         if (!apkFile.exists()) {
             updateProgress(DownloadProgress(status = DownloadStatus.FAILED, errorMessage = "ملف التحديث غير موجود"))
@@ -379,11 +383,16 @@ object InAppUpdateManager {
         // Check Unknown Sources permission on Android 8+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (!context.packageManager.canRequestPackageInstalls()) {
-                val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                showToastOnMain(context, "يرجى السماح بتثبيت التطبيقات من هذا المصدر للمتابعة")
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Cannot open unknown app sources settings: ${e.message}")
                 }
-                context.startActivity(intent)
                 return
             }
         }
@@ -402,7 +411,7 @@ object InAppUpdateManager {
             }
             context.startActivity(installIntent)
         } catch (e: Throwable) {
-            Log.e(TAG, "Failed to launch installer: ${e.message}")
+            Log.e(TAG, "Failed to launch installer: ${e.message}", e)
             updateProgress(DownloadProgress(status = DownloadStatus.FAILED, errorMessage = "تعذر فتح مثبت التطبيقات: ${e.message}"))
         }
     }
@@ -457,6 +466,14 @@ object InAppUpdateManager {
         } else {
             @Suppress("DEPRECATION")
             info.versionCode.toLong()
+        }
+    }
+
+    private fun showToastOnMain(context: Context, message: String) {
+        mainHandler.post {
+            try {
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            } catch (_: Throwable) {}
         }
     }
 }

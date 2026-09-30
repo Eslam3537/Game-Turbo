@@ -132,7 +132,7 @@ fun InAppUpdateDialog(
                 }
 
                 if (payload.fileSize > 0) {
-                    val sizeMb = String.format("%.1f MB", payload.fileSize / (1024.0 * 1024.0))
+                    val sizeMb = String.format(java.util.Locale.US, "%.1f MB", payload.fileSize / (1024.0 * 1024.0))
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "حجم التحديث: $sizeMb ${if (payload.releaseDate.isNotBlank()) "• ${payload.releaseDate}" else ""}",
@@ -201,9 +201,9 @@ fun InAppUpdateDialog(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            val downloadedMb = String.format("%.1f", progress.bytesDownloaded / (1024.0 * 1024.0))
+                            val downloadedMb = String.format(java.util.Locale.US, "%.1f", progress.bytesDownloaded / (1024.0 * 1024.0))
                             val totalMb = if (progress.totalBytes > 0) {
-                                String.format("%.1f MB", progress.totalBytes / (1024.0 * 1024.0))
+                                String.format(java.util.Locale.US, "%.1f MB", progress.totalBytes / (1024.0 * 1024.0))
                             } else "—"
 
                             Text(

@@ -3,11 +3,12 @@
   "versionName": "1.0.1",
   "apkUrl": "https://github.com/Eslam3537/Game-Turbo/releases/latest/download/app-debug.apk",
   "apkSha256": "",
-  "fileSize": 25000000,
+  "fileSize": 59973649,
   "forceUpdate": false,
   "releaseDate": "2026-09-29",
   "releaseNotes": [
-    "إضافة نظام التحديث التلقائي In-App Update Manager",
+    "الربط المباشر مع مستودع GitHub لتحميل التحديثات بسلاسة",
+    "حل مشكلة الإغلاق التلقائي عند فحص التحديثات",
     "تحسين دقة عداد FPS والحرارة فوق PUBG من خلال SurfaceFlinger",
     "تعزيز استقرار شاشة المراقبة العائمة وتوفير موارد المعالج"
   ]
