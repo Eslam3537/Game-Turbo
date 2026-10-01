@@ -1,15 +1,16 @@
 {
   "versionCode": 2,
-  "versionName": "1.0.1",
-  "apkUrl": "https://github.com/Eslam3537/Game-Turbo/releases/latest/download/app-debug.apk",
-  "apkSha256": "",
+  "versionName": "2",
+  "apkUrl": "https://github.com/Eslam3537/Game-Turbo/releases/latest/download/Game-Turbo-v2.apk",
+  "apkSha256": "734db32c4012000ab555e384f570e6f890d1dae9b6486e8e1a40cd3e504c2510",
   "fileSize": 59973649,
   "forceUpdate": false,
-  "releaseDate": "2026-09-29",
+  "releaseDate": "2026-10-01",
   "releaseNotes": [
-    "الربط المباشر مع مستودع GitHub لتحميل التحديثات بسلاسة",
-    "حل مشكلة الإغلاق التلقائي عند فحص التحديثات",
-    "تحسين دقة عداد FPS والحرارة فوق PUBG من خلال SurfaceFlinger",
-    "تعزيز استقرار شاشة المراقبة العائمة وتوفير موارد المعالج"
+    "تحديث رقم الإصدار إلى v2",
+    "تسمية ملف التثبيت باسم Game-Turbo-v2.apk وتحديثه ديناميكياً مع كل إصدار",
+    "توقيع التطبيق بالمفتاح الدائم (Permanent Key) للتثبيت المباشر فوق النسخ السابقة بدون أي تعارض",
+    "حل مشكلة Missing certificates وتفعيل كافة مخططات التوقيع الرسمية (V1, V2, V3, V4)",
+    "إضافة شعار وأيقونة التطبيق الفخمة الجديدة المستوحاة من Apple Liquid Glass"
   ]
 }

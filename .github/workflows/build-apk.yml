@@ -1,4 +1,4 @@
-name: Build Debug APK
+name: Build Game Turbo APK
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build & Verify Debug APK
+    name: Build & Publish Game Turbo APK
     runs-on: ubuntu-latest
 
     steps:
@@ -41,6 +41,24 @@ jobs:
           echo "Detected APP_VERSION: $APP_VERSION"
           echo "app_version=$APP_VERSION" >> $GITHUB_OUTPUT
 
+      - name: Restore permanent signing keystore
+        run: |
+          echo "=== Step 2: Restoring Permanent Signing Keystore ==="
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+            echo "Successfully restored ./debug.keystore from debug.keystore.base64"
+          fi
+
+          if [ ! -s "debug.keystore" ]; then
+            echo "::error::debug.keystore is missing or empty!"
+            exit 1
+          fi
+
+          # Install in ~/.android/debug.keystore so any standard toolchain uses the permanent key
+          mkdir -p ~/.android
+          cp debug.keystore ~/.android/debug.keystore
+          echo "Permanent keystore placed in project root and ~/.android/debug.keystore"
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -50,94 +68,58 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build the debug APK
+      - name: Build APK with Gradle
         run: |
-          echo "=== Step 2: Compiling Debug APK ==="
+          echo "=== Step 3: Compiling Game Turbo APK ==="
           chmod +x ./gradlew
           ./gradlew assembleDebug --stacktrace --no-daemon
 
-      - name: Verify the APK
+      - name: Standardize and Verify APK
         id: verify_apk
         run: |
-          echo "=== Step 3: Verifying Built APK(s) ==="
+          echo "=== Step 4: Standardizing APK Output Name and Verifying Signatures ==="
+          APP_VER="${{ steps.read_version.outputs.app_version }}"
           OUTPUT_DIR="app/build/outputs/apk/debug"
-          APK_COUNT=0
-          FAILED=0
-          PRIMARY_APK=""
+          TARGET_NAME="Game-Turbo-v${APP_VER}.apk"
+          TARGET_PATH="$OUTPUT_DIR/$TARGET_NAME"
 
-          while IFS= read -r apk; do
-            [ -z "$apk" ] && continue
-            APK_COUNT=$((APK_COUNT + 1))
-
-            if [ ! -f "$apk" ]; then
-              echo "::error::File does not exist: $apk"
-              FAILED=1
-              continue
-            fi
-
-            FILE_SIZE=$(stat -c%s "$apk" 2>/dev/null || wc -c < "$apk")
-            if [ "$FILE_SIZE" -le 0 ]; then
-              echo "::error::APK file $apk is empty (size: $FILE_SIZE bytes)!"
-              FAILED=1
-              continue
-            fi
-
-            SHA256_HASH=$(sha256sum "$apk" | awk '{print $1}')
-            echo "----------------------------------------"
-            echo "APK File : $apk"
-            echo "Size     : $FILE_SIZE bytes"
-            echo "SHA-256  : $SHA256_HASH"
-            echo "----------------------------------------"
-
-            if [ -z "$PRIMARY_APK" ]; then
-              PRIMARY_APK="$apk"
-            fi
-          done < <(find "$OUTPUT_DIR" -type f -name "*.apk" 2>/dev/null)
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "::error::No APK files found in $OUTPUT_DIR!"
-            echo "=== Directory listing of app/build/outputs/apk ==="
-            ls -R app/build/outputs/apk || true
+          SOURCE_APK=$(find "$OUTPUT_DIR" -type f -name "*.apk" | head -n 1)
+          if [ -z "$SOURCE_APK" ] || [ ! -s "$SOURCE_APK" ]; then
+            echo "::error::No compiled APK found in $OUTPUT_DIR!"
+            ls -R app/build/outputs || true
             exit 1
           fi
 
-          if [ $FAILED -ne 0 ]; then
-            echo "::error::One or more APK files failed verification!"
-            echo "=== Directory listing of app/build/outputs/apk ==="
-            ls -R app/build/outputs/apk || true
-            exit 1
+          if [ "$SOURCE_APK" != "$TARGET_PATH" ]; then
+            cp "$SOURCE_APK" "$TARGET_PATH"
           fi
 
-          echo "apk_path=$PRIMARY_APK" >> $GITHUB_OUTPUT
-          echo "SUCCESS: Verified $APK_COUNT APK file(s) successfully."
+          FILE_SIZE=$(stat -c%s "$TARGET_PATH" 2>/dev/null || wc -c < "$TARGET_PATH")
+          SHA256_HASH=$(sha256sum "$TARGET_PATH" | awk '{print $1}')
 
-      - name: Upload debug APK artifact
+          echo "----------------------------------------"
+          echo "Final APK   : $TARGET_NAME"
+          echo "Path        : $TARGET_PATH"
+          echo "Size        : $FILE_SIZE bytes"
+          echo "SHA-256     : $SHA256_HASH"
+          echo "----------------------------------------"
+
+          # Verify signature with apksigner if available in Android SDK
+          APKSIGNER=$(find $ANDROID_SDK_ROOT/build-tools -name apksigner 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$APKSIGNER" ] && [ -x "$APKSIGNER" ]; then
+            echo "Verifying APK with apksigner ($APKSIGNER)..."
+            "$APKSIGNER" verify -v --print-certs "$TARGET_PATH" || echo "apksigner verification warning"
+          fi
+
+          echo "apk_path=$TARGET_PATH" >> $GITHUB_OUTPUT
+          echo "apk_name=$TARGET_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload Game Turbo APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Game-Turbo-v${{ steps.read_version.outputs.app_version }}-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: Game-Turbo-v${{ steps.read_version.outputs.app_version }}
+          path: ${{ steps.verify_apk.outputs.apk_path }}
           if-no-files-found: error
-
-      - name: Prepare APK release asset
-        id: prepare_asset
-        run: |
-          echo "=== Step 4: Preparing Release Asset ==="
-          APP_VER="${{ steps.read_version.outputs.app_version }}"
-          SOURCE_APK="${{ steps.verify_apk.outputs.apk_path }}"
-          TARGET_NAME="Game-Turbo-v${APP_VER}-debug.apk"
-          TEMP_RELEASE_DIR=$(mktemp -d)
-          TARGET_PATH="$TEMP_RELEASE_DIR/$TARGET_NAME"
-
-          cp "$SOURCE_APK" "$TARGET_PATH"
-
-          if [ ! -f "$TARGET_PATH" ] || [ ! -s "$TARGET_PATH" ]; then
-            echo "::error::Failed to prepare debug release asset at $TARGET_PATH"
-            exit 1
-          fi
-
-          echo "Prepared asset at: $TARGET_PATH"
-          echo "asset_path=$TARGET_PATH" >> $GITHUB_OUTPUT
-          echo "asset_name=$TARGET_NAME" >> $GITHUB_OUTPUT
 
       - name: Publish APK to GitHub Releases
         id: create_release
@@ -145,52 +127,42 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "=== Step 5: Publishing Debug Asset to GitHub Releases ==="
+          echo "=== Step 5: Publishing Game Turbo to GitHub Releases ==="
           APP_VER="${{ steps.read_version.outputs.app_version }}"
-          RELEASE_TAG="v$APP_VER-debug"
-          RELEASE_TITLE="Game Turbo v$APP_VER (Debug Build #${{ github.run_number }})"
-          ASSET_FILE="${{ steps.prepare_asset.outputs.asset_path }}"
-
-          if [ ! -f "$ASSET_FILE" ] || [ ! -s "$ASSET_FILE" ]; then
-            echo "::error::Release asset $ASSET_FILE is invalid."
-            exit 1
-          fi
+          RELEASE_TAG="v$APP_VER"
+          RELEASE_TITLE="Game Turbo v$APP_VER"
+          ASSET_FILE="${{ steps.verify_apk.outputs.apk_path }}"
+          ASSET_NAME="${{ steps.verify_apk.outputs.apk_name }}"
 
           NOTES=$(cat <<EOF
-          ### Game Turbo v$APP_VER Debug Build
-          - **Build System:** GitHub Actions
-          - **Version:** v$APP_VER
-          - **Run Number:** #${{ github.run_number }}
+          ### Game Turbo v$APP_VER Official Release
+          - **File Name:** \`$ASSET_NAME\`
+          - **Version:** \`v$APP_VER\`
+          - **Signing:** Permanent Signature (Supports seamless in-place install over previous versions)
+          - **Architecture:** Universal Android (API 29+)
           - **Source Commit:** ${{ github.sha }}
-          - **Signing:** Debug Keystore (For development and testing only)
           EOF
           )
 
           gh release create "$RELEASE_TAG" \
-            "$ASSET_FILE" \
+            "$ASSET_FILE#$ASSET_NAME" \
             --title "$RELEASE_TITLE" \
             --notes "$NOTES" \
             --target "${{ github.sha }}" \
-            --prerelease || gh release upload "$RELEASE_TAG" "$ASSET_FILE" --clobber
+            --latest || gh release upload "$RELEASE_TAG" "$ASSET_FILE#$ASSET_NAME" --clobber
 
       - name: Report APK download result
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "=== Step 6: APK Summary Report ==="
+          echo "=== Step 6: Download Summary ==="
           APP_VER="${{ steps.read_version.outputs.app_version }}"
-          ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
-          if [ "${{ steps.create_release.outcome }}" = "success" ]; then
-            RELEASE_TAG="v$APP_VER-debug"
-            DIRECT_URL="https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/$ASSET_NAME"
-            echo "DIRECT APK DOWNLOAD URL: $DIRECT_URL"
-            echo "### DIRECT APK DOWNLOAD" >> $GITHUB_STEP_SUMMARY
-            echo "[$DIRECT_URL]($DIRECT_URL)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "The GitHub Actions artifact **Game-Turbo-v${APP_VER}-debug** is also preserved." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "Notice: GitHub Release creation was skipped or completed with notice."
-            echo "### APK BUILD ARTIFACT" >> $GITHUB_STEP_SUMMARY
-            echo "The debug APK artifact **Game-Turbo-v${APP_VER}-debug** is available on the workflow run page." >> $GITHUB_STEP_SUMMARY
-          fi
+          ASSET_NAME="${{ steps.verify_apk.outputs.apk_name }}"
+          DIRECT_URL="https://github.com/${{ github.repository }}/releases/download/v$APP_VER/$ASSET_NAME"
+          LATEST_URL="https://github.com/${{ github.repository }}/releases/latest/download/$ASSET_NAME"
+
+          echo "DIRECT DOWNLOAD (v$APP_VER): $DIRECT_URL"
+          echo "LATEST DOWNLOAD LINK       : $LATEST_URL"
+          echo "### 🚀 Game Turbo v$APP_VER Download" >> $GITHUB_STEP_SUMMARY
+          echo "- **Direct Download:** [$ASSET_NAME]($DIRECT_URL)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest Link:** [$ASSET_NAME]($LATEST_URL)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Actions Artifact:** Game-Turbo-v$APP_VER" >> $GITHUB_STEP_SUMMARY

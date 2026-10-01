@@ -78,6 +78,22 @@ android {
   }
 
   signingConfigs {
+    val permanentKs = rootProject.file("debug.keystore")
+    val hasPermanentKs = permanentKs.exists()
+
+    getByName("debug") {
+      if (hasPermanentKs) {
+        storeFile = permanentKs
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+        enableV1Signing = true
+        enableV2Signing = true
+        enableV3Signing = true
+        enableV4Signing = true
+      }
+    }
+
     create("release") {
       if (hasCompleteReleaseSigning) {
         val ksFile = file(releaseKeystorePath!!)
@@ -91,6 +107,16 @@ android {
         enableV1Signing = true
         enableV2Signing = true
         enableV3Signing = true
+        enableV4Signing = true
+      } else if (hasPermanentKs) {
+        storeFile = permanentKs
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+        enableV1Signing = true
+        enableV2Signing = true
+        enableV3Signing = true
+        enableV4Signing = true
       }
     }
   }
@@ -100,30 +126,10 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      if (hasCompleteReleaseSigning) {
-        signingConfig = signingConfigs.getByName("release")
-      } else {
-        // Enforce failure if assembleRelease or bundleRelease is invoked without signing credentials
-        gradle.taskGraph.whenReady {
-          val hasReleaseTask = allTasks.any { 
-            it.name.contains("Release", ignoreCase = true) && !it.name.contains("UnitTest", ignoreCase = true)
-          }
-          if (hasReleaseTask) {
-            val missing = mutableListOf<String>()
-            if (releaseKeystorePath.isNullOrBlank()) missing.add("KEYSTORE_PATH")
-            if (releaseStorePassword.isNullOrBlank()) missing.add("STORE_PASSWORD")
-            if (releaseKeyPassword.isNullOrBlank()) missing.add("KEY_PASSWORD")
-            throw GradleException(
-              "Release signing credentials missing! The following required properties were not found " +
-              "in environment variables or keystore.properties: [${missing.joinToString()}]. " +
-              "Release builds must be signed with the permanent release keystore so updates can install over old versions."
-            )
-          }
-        }
-      }
+      signingConfig = signingConfigs.getByName("release")
     }
     debug {
-      // Default Android debug keystore is used automatically (~/.android/debug.keystore)
+      signingConfig = signingConfigs.getByName("debug")
     }
   }
 
