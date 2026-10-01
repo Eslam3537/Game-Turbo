@@ -93,36 +93,49 @@ fun AppleHomeScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "Game Turbo",
-                            style = AppleTypography.displayMedium,
-                            color = theme.textPrimary,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                        Surface(
-                            shape = RoundedCornerShape(AppleRadius.pill),
-                            color = theme.accent.copy(alpha = 0.15f),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, theme.accent.copy(alpha = 0.35f))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Image(
+                        painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.ic_game_turbo_logo),
+                        contentDescription = "Game Turbo Emblem",
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(AppleRadius.medium))
+                            .border(1.dp, theme.accent.copy(alpha = 0.35f), RoundedCornerShape(AppleRadius.medium))
+                    )
+                    Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = "v${com.example.BuildConfig.VERSION_NAME}",
-                                color = theme.accent,
-                                style = AppleTypography.footnote,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                text = "Game Turbo",
+                                style = AppleTypography.displayMedium,
+                                color = theme.textPrimary,
+                                fontWeight = FontWeight.ExtraBold
                             )
+                            Surface(
+                                shape = RoundedCornerShape(AppleRadius.pill),
+                                color = theme.accent.copy(alpha = 0.15f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, theme.accent.copy(alpha = 0.35f))
+                            ) {
+                                Text(
+                                    text = "v${com.example.BuildConfig.VERSION_NAME}",
+                                    color = theme.accent,
+                                    style = AppleTypography.footnote,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                )
+                            }
                         }
+                        Text(
+                            text = if (isRtl) "نظام تحسين الأداء ومراقبة العتاد الحقيقي" else "Hardware Telemetry & Performance OS",
+                            style = AppleTypography.footnote,
+                            color = theme.textSecondary
+                        )
                     }
-                    Text(
-                        text = if (isRtl) "نظام تحسين الأداء ومراقبة العتاد الحقيقي" else "Hardware Telemetry & Performance OS",
-                        style = AppleTypography.footnote,
-                        color = theme.textSecondary
-                    )
                 }
 
                 Row(
