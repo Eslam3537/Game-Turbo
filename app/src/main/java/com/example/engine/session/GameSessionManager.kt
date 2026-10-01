@@ -1,9 +1,12 @@
 package com.example.engine.session
 
+import android.app.Notification
+import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import com.example.data.AppPreferencesManager
 import com.example.data.BoosterDao
 import com.example.data.DiagnosticEventRecord
@@ -11,12 +14,12 @@ import com.example.data.GameSessionRecord
 import com.example.engine.capability.DeviceCapabilityEngine
 import com.example.engine.network.NetworkStabilityEngine
 import com.example.engine.performance.FrameTimeMonitor
-import com.example.engine.performance.GameFpsSampler
+import com.example.engine.performance.SurfaceFlingerFpsEngine
 import com.example.engine.shizuku.CommandRegistry
 import com.example.engine.shizuku.RollbackReport
 import com.example.engine.shizuku.ShizukuExecutionEngine
+import com.example.engine.shizuku.VerificationLevel
 import com.example.engine.thermal.ThermalGuardEngine
-import com.example.engine.thermal.ThermalStatusLevel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +31,7 @@ enum class GameSessionState {
     OPTIMIZING,
     VERIFYING,
     RUNNING,
+    SAFE_MODE_REVERTED,
     ENDING,
     RESTORING,
     COMPLETED,
@@ -43,26 +47,35 @@ data class SessionActiveReport(
     val baselineRttMs: Int? = null,
     val baselineTempC: Double? = null,
     val baselineJitterMs: Int? = null,
+    val baselineFpsMedian: Int? = null,
     val currentRttMs: Int? = null,
     val currentTempC: Double? = null,
+    val currentSensorLabel: String? = null,
     val currentJitterMs: Int? = null,
     val gameFps: Int? = null,
+    val sessionAvgFps: Int? = null,
+    val sessionPeakTempC: Double? = null,
     val appliedOptimizations: Int = 0,
     val verifiedOptimizations: Int = 0,
     val failedOptimizations: Int = 0,
     val rttSpikesDetected: Int = 0,
     val frameSpikesDetected: Int = 0,
     val thermalThrottlingDetected: Boolean = false,
+    val isDnsAppliedInSession: Boolean = false,
+    val safeModeMessage: String? = null,
     val verdict: String = "MEASURING"
 )
 
 data class SessionStartResult(
     val success: Boolean,
     val appliedCount: Int,
-    val verifiedCount: Int,
+    val storedCount: Int,
+    val effectConfirmedCount: Int,
     val failedCount: Int,
     val errorMessage: String? = null
-)
+) {
+    val verifiedCount: Int get() = storedCount + effectConfirmedCount
+}
 
 class GameSessionManager(
     private val context: Context,
@@ -91,16 +104,25 @@ class GameSessionManager(
     private var baselineRtt: Int? = null
     private var baselineJitter: Int? = null
     private var baselineTemp: Double? = null
+    private var baselineFpsMedian: Int? = null
+
+    private var isDnsAppliedInSession = false
+    private var sessionPeakTemp: Double = 0.0
     private val sessionRttSamples = mutableListOf<Int>()
+    private val sessionFpsSamples = mutableListOf<Int>()
+
+    private var initialAppliedCount = 0
+    private var initialVerifiedCount = 0
+    private var initialFailedCount = 0
 
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
 
     init {
-        // Wire Safe Mode thermal protection callback
-        thermalEngine.onSevereThermalDetected = {
+        // Wire Safe Mode thermal protection callback with hysteresis (Fix A7)
+        thermalEngine.onSevereThermalTriggered = { tempC, isThrottling ->
             if (prefsManager.safeModeEnabled.value && _sessionState.value == GameSessionState.RUNNING) {
                 scope.launch {
-                    handleSafeModeTrigger()
+                    handleSafeModeTrigger(tempC, isThrottling)
                 }
             }
         }
@@ -112,7 +134,7 @@ class GameSessionManager(
     suspend fun checkForInterruptedSession(): RollbackReport? = withContext(Dispatchers.IO) {
         val snapshotCount = boosterDao.getSnapshotCount()
         if (snapshotCount > 0 || prefsManager.isSessionActive.value) {
-            Log.w(TAG, "Found $snapshotCount orphaned snapshots from an interrupted session. Restoring baseline...")
+            Log.w(TAG, "Found $snapshotCount snapshots from an interrupted session. Restoring baseline...")
             val report = shizukuEngine.rollbackAll()
             prefsManager.setSessionActiveState(false, 0L)
             boosterDao.insertEvent(
@@ -139,36 +161,43 @@ class GameSessionManager(
         profile: String
     ): SessionStartResult = withContext(Dispatchers.IO) {
         if (_sessionState.value == GameSessionState.RUNNING || _sessionState.value == GameSessionState.OPTIMIZING) {
-            return@withContext SessionStartResult(false, 0, 0, 0, "A session is already active")
+            return@withContext SessionStartResult(false, 0, 0, 0, 0, "A session is already active")
         }
 
         _sessionState.value = GameSessionState.PREPARING
         sessionStartTime = System.currentTimeMillis()
         activeGamePackage = gamePackage
         activeGameName = gameName
+        sessionRttSamples.clear()
+        sessionFpsSamples.clear()
 
-        // 1. Establish real baselines with 10 real samples
+        // 1. Establish baselines
         networkEngine.start()
         frameMonitor.start()
         thermalEngine.startMonitoring()
-        sessionRttSamples.clear()
 
         val baselineSamples = mutableListOf<Int>()
         for (i in 0 until 10) {
             networkEngine.sampleRtt()?.let { baselineSamples.add(it) }
-            delay(80)
+            delay(60)
         }
-        val medianBaseline = if (baselineSamples.isNotEmpty()) {
-            val sorted = baselineSamples.sorted()
-            sorted[sorted.size / 2]
-        } else {
-            networkEngine.sampleRtt()
-        }
-        baselineRtt = medianBaseline
+        baselineRtt = if (baselineSamples.isNotEmpty()) baselineSamples.sorted()[baselineSamples.size / 2] else null
         baselineJitter = networkEngine.networkProfile.value.jitterMs
-        baselineTemp = thermalEngine.thermalState.value.batteryTempCelsius
 
-        // 2. Gaming DND: set interruption filter if granted & enabled
+        val thermalSample = thermalEngine.thermalState.value
+        baselineTemp = thermalSample.batteryTempCelsius
+        sessionPeakTemp = baselineTemp ?: 0.0
+
+        // Pre-sample game FPS baseline (up to 5 samples if game already running)
+        val initialFpsSamples = mutableListOf<Int>()
+        for (i in 0 until 5) {
+            val f = SurfaceFlingerFpsEngine.sampleFps(context, gamePackage)
+            if (f != null) initialFpsSamples.add(f)
+            delay(100)
+        }
+        baselineFpsMedian = if (initialFpsSamples.isNotEmpty()) initialFpsSamples.sorted()[initialFpsSamples.size / 2] else null
+
+        // 2. Gaming DND
         if (prefsManager.dndEnabled.value && notificationManager?.isNotificationPolicyAccessGranted == true) {
             try {
                 val currentFilter = notificationManager.currentInterruptionFilter
@@ -179,7 +208,7 @@ class GameSessionManager(
                         sessionId = currentSessionId,
                         eventType = "DND",
                         title = "Gaming DND Filter Active",
-                        description = "Interruption filter set to Priority to prevent notifications during match.",
+                        description = "Interruption filter set to Priority to silence notifications during match.",
                         severity = "INFO"
                     )
                 )
@@ -191,43 +220,58 @@ class GameSessionManager(
         // 3. Execute profile commands
         _sessionState.value = GameSessionState.OPTIMIZING
         val caps = DeviceCapabilityEngine.scan(context)
-        val commandsWithValues = CommandRegistry.getCommandsForProfile(profile, caps.maxRefreshRateHz)
+        val selectedDns = prefsManager.selectedDns.value
+        val commandsWithValues = CommandRegistry.getCommandsForProfile(profile, caps.maxRefreshRateHz, selectedDns)
 
         var appliedCount = 0
-        var verifiedCount = 0
+        var storedCount = 0
+        var effectConfirmedCount = 0
         var failedCount = 0
         val failureMessages = mutableListOf<String>()
+
+        isDnsAppliedInSession = false
 
         for ((cmd, targetVal) in commandsWithValues) {
             val result = shizukuEngine.applyAndVerify(cmd, gamePackage, targetVal)
             if (result.isSuccess) {
                 appliedCount++
-                verifiedCount++
+                if (result.verificationLevel == VerificationLevel.EFFECT_CONFIRMED) {
+                    effectConfirmedCount++
+                } else {
+                    storedCount++
+                }
+                if (cmd.id == "private_dns") {
+                    isDnsAppliedInSession = true
+                }
             } else {
                 failedCount++
                 result.errorMessage?.let { failureMessages.add("${cmd.nameEn}: $it") }
             }
         }
 
-        _sessionState.value = GameSessionState.VERIFYING
+        val totalVerified = storedCount + effectConfirmedCount
 
-        // Non-negotiable rule 3: If 0 verified, the session FAILS!
-        if (verifiedCount == 0) {
+        // Rule R3: If 0 verified, the session FAILS
+        if (totalVerified == 0) {
             Log.e(TAG, "Session activation failed: 0 commands verified")
             _sessionState.value = GameSessionState.FAILED
-            // Roll back any partially applied settings
             shizukuEngine.rollbackAll(gamePackage)
             restoreDnd()
             return@withContext SessionStartResult(
                 success = false,
                 appliedCount = appliedCount,
-                verifiedCount = 0,
+                storedCount = 0,
+                effectConfirmedCount = 0,
                 failedCount = failedCount,
-                errorMessage = failureMessages.joinToString("; ").ifBlank { "No optimizations could be verified" }
+                errorMessage = failureMessages.joinToString("; ").ifBlank { "No optimizations verified" }
             )
         }
 
-        // Insert Session in Database
+        initialAppliedCount = appliedCount
+        initialVerifiedCount = totalVerified
+        initialFailedCount = failedCount
+
+        // 4. Record session in Room
         val newSession = GameSessionRecord(
             gamePackage = gamePackage,
             gameName = gameName,
@@ -237,7 +281,7 @@ class GameSessionManager(
             baselineJitterMs = baselineJitter,
             baselineTempC = baselineTemp?.toInt(),
             appliedOptimizationsCount = appliedCount,
-            verifiedOptimizationsCount = verifiedCount,
+            verifiedOptimizationsCount = totalVerified,
             failedOptimizationsCount = failedCount
         )
         currentSessionId = boosterDao.insertSession(newSession)
@@ -248,20 +292,37 @@ class GameSessionManager(
                 sessionId = currentSessionId,
                 eventType = "OPTIMIZATION",
                 title = "Session Started ($profile)",
-                description = "Applied $appliedCount, verified $verifiedCount settings for $gameName",
+                description = "Applied $appliedCount, verified $totalVerified ($effectConfirmedCount confirmed effect, $storedCount stored) for $gameName",
                 severity = "INFO"
             )
         )
 
         _sessionState.value = GameSessionState.RUNNING
 
-        // Launch monitoring loop
+        // 5. Initialize Active Report with real numbers immediately (Fix A10)
+        _activeReport.value = SessionActiveReport(
+            sessionId = currentSessionId,
+            gameName = activeGameName,
+            gamePackage = activeGamePackage,
+            durationSeconds = 0,
+            state = GameSessionState.RUNNING,
+            baselineRttMs = baselineRtt,
+            baselineTempC = baselineTemp,
+            baselineJitterMs = baselineJitter,
+            baselineFpsMedian = baselineFpsMedian,
+            appliedOptimizations = initialAppliedCount,
+            verifiedOptimizations = initialVerifiedCount,
+            failedOptimizations = initialFailedCount,
+            isDnsAppliedInSession = isDnsAppliedInSession
+        )
+
         startActiveMonitoringLoop()
 
         SessionStartResult(
             success = true,
             appliedCount = appliedCount,
-            verifiedCount = verifiedCount,
+            storedCount = storedCount,
+            effectConfirmedCount = effectConfirmedCount,
             failedCount = failedCount
         )
     }
@@ -269,58 +330,73 @@ class GameSessionManager(
     private fun startActiveMonitoringLoop() {
         sessionJob?.cancel()
         sessionJob = scope.launch {
-            while (isActive && _sessionState.value == GameSessionState.RUNNING) {
+            while (isActive && (_sessionState.value == GameSessionState.RUNNING || _sessionState.value == GameSessionState.SAFE_MODE_REVERTED)) {
                 val rtt = networkEngine.sampleRtt()
                 if (rtt != null) {
                     sessionRttSamples.add(rtt)
                     if (sessionRttSamples.size > 50) sessionRttSamples.removeAt(0)
                 }
+
                 thermalEngine.refresh()
-                val currentFps = GameFpsSampler.sampleGameFps(activeGamePackage)
+
+                val currentFps = SurfaceFlingerFpsEngine.sampleFps(context, activeGamePackage)
+                if (currentFps != null) {
+                    sessionFpsSamples.add(currentFps)
+                    if (sessionFpsSamples.size > 100) sessionFpsSamples.removeAt(0)
+                }
 
                 val net = networkEngine.networkProfile.value
                 val therm = thermalEngine.thermalState.value
-                val durationSec = (System.currentTimeMillis() - sessionStartTime) / 1000
 
-                // Statistically meaningful verdict requires >= 10 real samples
-                val verdict = when {
-                    sessionRttSamples.size < 10 -> "INSUFFICIENT_DATA"
-                    baselineRtt != null -> {
-                        val sortedSession = sessionRttSamples.sorted()
-                        val sessionMedian = sortedSession[sortedSession.size / 2]
-                        val baseMed = baselineRtt!!
-                        val baseJitter = baselineJitter ?: 5
-                        val threshold = maxOf((baseMed * 0.10).toInt(), 2 * baseJitter).coerceAtLeast(3)
-                        if (baseMed - sessionMedian >= threshold) {
-                            "MEASURED_IMPROVEMENT"
-                        } else if (sessionMedian - baseMed >= threshold) {
-                            "ELEVATED_LATENCY"
-                        } else {
-                            "NO_SIGNIFICANT_CHANGE"
-                        }
-                    }
-                    else -> "MEASURED_STABLE"
+                therm.batteryTempCelsius?.let { t ->
+                    if (t > sessionPeakTemp) sessionPeakTemp = t
                 }
 
-                _activeReport.value = SessionActiveReport(
-                    sessionId = currentSessionId,
-                    gameName = activeGameName,
-                    gamePackage = activeGamePackage,
+                val durationSec = (System.currentTimeMillis() - sessionStartTime) / 1000
+
+                val avgFps = if (sessionFpsSamples.isNotEmpty()) {
+                    val sorted = sessionFpsSamples.sorted()
+                    sorted[sorted.size / 2]
+                } else null
+
+                // Fix A10: Meaningful verdict: FPS is primary when available; label RTT honestly
+                val verdict = when {
+                    sessionFpsSamples.size >= 10 && baselineFpsMedian != null -> {
+                        val currentFpsMedian = avgFps ?: 0
+                        val baseFps = baselineFpsMedian!!
+                        when {
+                            currentFpsMedian >= (baseFps + 5) -> "MEASURED_FPS_IMPROVEMENT"
+                            currentFpsMedian <= (baseFps - 8) -> "FRAME_RATE_DROPPED"
+                            else -> "FPS_STABLE"
+                        }
+                    }
+                    sessionRttSamples.size >= 10 && baselineRtt != null -> {
+                        val sessionMedian = sessionRttSamples.sorted()[sessionRttSamples.size / 2]
+                        val baseMed = baselineRtt!!
+                        val threshold = maxOf((baseMed * 0.10).toInt(), 5)
+                        when {
+                            baseMed - sessionMedian >= threshold -> {
+                                if (isDnsAppliedInSession) "DNS_LATENCY_IMPROVEMENT" else "NETWORK_RTT_LOWER (Unrelated to OS tweaks)"
+                            }
+                            sessionMedian - baseMed >= threshold -> "NETWORK_RTT_ELEVATED (Carrier jitter)"
+                            else -> "NETWORK_RTT_STABLE"
+                        }
+                    }
+                    else -> "MEASURING"
+                }
+
+                _activeReport.value = _activeReport.value?.copy(
                     durationSeconds = durationSec,
-                    state = GameSessionState.RUNNING,
-                    baselineRttMs = baselineRtt,
-                    baselineTempC = baselineTemp,
-                    baselineJitterMs = baselineJitter,
                     currentRttMs = net.currentRttMs,
                     currentTempC = therm.batteryTempCelsius,
+                    currentSensorLabel = therm.sensorLabel,
                     currentJitterMs = net.jitterMs,
                     gameFps = currentFps,
-                    appliedOptimizations = _activeReport.value?.appliedOptimizations ?: 0,
-                    verifiedOptimizations = _activeReport.value?.verifiedOptimizations ?: 0,
-                    failedOptimizations = _activeReport.value?.failedOptimizations ?: 0,
+                    sessionAvgFps = avgFps,
+                    sessionPeakTempC = sessionPeakTemp,
                     rttSpikesDetected = net.lostSamplesCount,
                     frameSpikesDetected = frameMonitor.timingStats.value.frameSpikesCount,
-                    thermalThrottlingDetected = therm.isThrottlingLikely,
+                    thermalThrottlingDetected = therm.isThrottlingConfirmed,
                     verdict = verdict
                 )
 
@@ -329,23 +405,55 @@ class GameSessionManager(
         }
     }
 
-    private suspend fun handleSafeModeTrigger() = withContext(Dispatchers.IO) {
+    /**
+     * Fix A7: Safe Mode partial rollback of aggressive commands only.
+     */
+    private suspend fun handleSafeModeTrigger(tempC: Double?, isThrottling: Boolean) = withContext(Dispatchers.IO) {
+        val triggerReason = if (isThrottling) "System Throttling Confirmed by PowerManager" else "Battery Temperature Reached ${tempC?.toInt() ?: 43}°C"
+
+        Log.w(TAG, "Safe Mode activated: $triggerReason. Reverting aggressive tweaks.")
+        val report = shizukuEngine.rollbackAggressiveCommands(activeGamePackage)
+
         boosterDao.insertEvent(
             DiagnosticEventRecord(
                 sessionId = currentSessionId,
                 eventType = "SAFE_MODE",
-                title = "Thermal Protection Activated",
-                description = "High thermal pressure detected. Reverting aggressive performance tweaks to protect hardware.",
+                title = "Safe Mode Protection Triggered",
+                description = "$triggerReason. Reverted ${report.restoredCount} aggressive tweaks (refresh lock, doze, background kills) to safeguard hardware.",
                 severity = "WARNING"
             )
         )
-        // Rollback high-risk commands while leaving session alive
-        shizukuEngine.rollbackAll(activeGamePackage)
+
+        _sessionState.value = GameSessionState.SAFE_MODE_REVERTED
+        val safeMsg = "Safe Mode: aggressive tweaks reverted (${tempC?.toInt()}°C)"
+
+        _activeReport.value = _activeReport.value?.copy(
+            state = GameSessionState.SAFE_MODE_REVERTED,
+            safeModeMessage = safeMsg
+        )
+
+        showSafeModeNotification(safeMsg)
+    }
+
+    private fun showSafeModeNotification(msg: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel("game_turbo_safety", "Safety Alerts", NotificationManager.IMPORTANCE_HIGH)
+            notificationManager?.createNotificationChannel(channel)
+        }
+        val notif = NotificationCompat.Builder(context, "game_turbo_safety")
+            .setContentTitle("Game Turbo: وضع الأمان")
+            .setContentText(msg)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        try {
+            notificationManager?.notify(9001, notif)
+        } catch (_: Throwable) {}
     }
 
     /**
-     * Ends session and performs verified rollback of all system changes.
-     * MUST be awaited before UI reports restored state!
+     * Ends session and performs verified rollback of all system changes (Fix A8).
      */
     suspend fun endSession(): RollbackReport = withContext(Dispatchers.IO) {
         _sessionState.value = GameSessionState.ENDING
@@ -355,31 +463,15 @@ class GameSessionManager(
         val rollbackReport = shizukuEngine.rollbackAll(activeGamePackage)
         restoreDnd()
 
-        // Update session record in DB
         val durationSec = (System.currentTimeMillis() - sessionStartTime) / 1000
         val net = networkEngine.networkProfile.value
         val therm = thermalEngine.thermalState.value
         val existing = boosterDao.getSessionById(currentSessionId)
 
         if (existing != null) {
-            val verdict = when {
-                sessionRttSamples.size < 10 -> "INSUFFICIENT_DATA"
-                baselineRtt != null -> {
-                    val sortedSession = sessionRttSamples.sorted()
-                    val sessionMedian = sortedSession[sortedSession.size / 2]
-                    val baseMed = baselineRtt!!
-                    val baseJitter = baselineJitter ?: 5
-                    val threshold = maxOf((baseMed * 0.10).toInt(), 2 * baseJitter).coerceAtLeast(3)
-                    if (baseMed - sessionMedian >= threshold) {
-                        "MEASURED_IMPROVEMENT"
-                    } else if (sessionMedian - baseMed >= threshold) {
-                        "ELEVATED_LATENCY"
-                    } else {
-                        "NO_SIGNIFICANT_CHANGE"
-                    }
-                }
-                else -> "MEASURED_STABLE"
-            }
+            val avgFps = if (sessionFpsSamples.isNotEmpty()) sessionFpsSamples.sorted()[sessionFpsSamples.size / 2] else null
+            val finalVerdict = _activeReport.value?.verdict ?: "COMPLETED"
+
             boosterDao.updateSession(
                 existing.copy(
                     endTime = System.currentTimeMillis(),
@@ -387,18 +479,20 @@ class GameSessionManager(
                     avgRttMs = net.avgRttMs,
                     maxRttMs = net.maxRttMs,
                     avgJitterMs = net.jitterMs,
-                    peakTempC = therm.batteryTempCelsius?.toInt(),
-                    thermalThrottlingDetected = therm.isThrottlingLikely,
+                    peakTempC = sessionPeakTemp.toInt(),
+                    avgFps = avgFps,
+                    thermalThrottlingDetected = therm.isThrottlingConfirmed,
                     rollbackSuccess = rollbackReport.isFullyRestored,
-                    summaryVerdict = verdict
+                    summaryVerdict = finalVerdict
                 )
             )
+
             boosterDao.insertEvent(
                 DiagnosticEventRecord(
                     sessionId = currentSessionId,
                     eventType = "ROLLBACK",
-                    title = "Session Terminated",
-                    description = "Restored ${rollbackReport.restoredCount} of ${rollbackReport.totalSnapshots} original system settings. " +
+                    title = "Session Terminated & Rolled Back",
+                    description = "Restored ${rollbackReport.restoredCount} of ${rollbackReport.totalSnapshots} system settings. " +
                             if (rollbackReport.failedCommands.isNotEmpty()) "Failed: ${rollbackReport.failedCommands.joinToString()}" else "All baseline settings restored.",
                     severity = if (rollbackReport.isFullyRestored) "INFO" else "WARNING"
                 )
@@ -406,13 +500,10 @@ class GameSessionManager(
         }
 
         prefsManager.setSessionActiveState(false, 0L)
-        frameMonitor.stop()
-        thermalEngine.stopMonitoring()
-        networkEngine.stop()
 
         _activeReport.value = null
         _sessionState.value = GameSessionState.COMPLETED
-        delay(300)
+        delay(200)
         _sessionState.value = GameSessionState.IDLE
 
         rollbackReport
@@ -428,5 +519,10 @@ class GameSessionManager(
                 Log.e(TAG, "Failed to restore DND filter: ${e.message}")
             }
         }
+    }
+
+    fun release() {
+        sessionJob?.cancel()
+        scope.cancel()
     }
 }

@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -9,7 +10,7 @@ plugins {
 // 1. Single source of truth: read APP_VERSION from version.properties
 val versionPropsFile = rootProject.file("version.properties")
 if (!versionPropsFile.exists()) {
-  throw GradleException("Missing 'version.properties' in root project directory. Create it with APP_VERSION=<number>.")
+  throw GradleException("Missing 'version.properties' in root project directory. Create it with APP_VERSION=<positive_integer>.")
 }
 
 val versionProps = Properties().apply {
@@ -24,8 +25,41 @@ if (appVersion == null || appVersion <= 0) {
   throw GradleException("Invalid APP_VERSION in version.properties: '$appVersionRaw'. Must be a positive integer (e.g. 1, 2, 3...).")
 }
 
+// 2. Load permanent release signing configuration from environment or keystore.properties fallback
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+  if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use { load(it) }
+  }
+}
+
+val releaseKeystorePath = System.getenv("KEYSTORE_PATH")
+  ?: keystoreProperties.getProperty("KEYSTORE_PATH")
+  ?: keystoreProperties.getProperty("storeFile")
+
+val releaseStorePassword = System.getenv("STORE_PASSWORD")
+  ?: keystoreProperties.getProperty("STORE_PASSWORD")
+  ?: keystoreProperties.getProperty("storePassword")
+
+val releaseKeyAlias = System.getenv("KEY_ALIAS")
+  ?: keystoreProperties.getProperty("KEY_ALIAS")
+  ?: keystoreProperties.getProperty("keyAlias")
+  ?: "upload"
+
+val releaseKeyPassword = System.getenv("KEY_PASSWORD")
+  ?: keystoreProperties.getProperty("KEY_PASSWORD")
+  ?: keystoreProperties.getProperty("keyPassword")
+
+val hasCompleteReleaseSigning = !releaseKeystorePath.isNullOrBlank() &&
+    !releaseStorePassword.isNullOrBlank() &&
+    !releaseKeyPassword.isNullOrBlank()
+
 base {
   archivesName.set("Game-Turbo-v$appVersion")
+}
+
+ksp {
+  arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 android {
@@ -33,7 +67,8 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.gameturbo.kxmpzq"
+    // DO NOT CHANGE - changing it breaks in-place updates.
+    applicationId = "com.aistudio.pubgbooster.remix"
     minSdk = 29
     targetSdk = 36
     versionCode = appVersion
@@ -42,26 +77,20 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
-  val keystorePath = System.getenv("KEYSTORE_PATH")
-  val storePassword = System.getenv("STORE_PASSWORD")
-  val keyPassword = System.getenv("KEY_PASSWORD")
-  val keyAliasEnv = System.getenv("KEY_ALIAS") ?: "upload"
-
-  val hasReleaseSigning = !keystorePath.isNullOrBlank() &&
-      !storePassword.isNullOrBlank() &&
-      !keyPassword.isNullOrBlank()
-
   signingConfigs {
     create("release") {
-      if (hasReleaseSigning) {
-        val ksFile = file(keystorePath!!)
+      if (hasCompleteReleaseSigning) {
+        val ksFile = file(releaseKeystorePath!!)
         if (!ksFile.exists()) {
-          throw GradleException("Specified KEYSTORE_PATH does not exist: ${ksFile.absolutePath}")
+          throw GradleException("Release keystore file does not exist at: ${ksFile.absolutePath}")
         }
         storeFile = ksFile
-        this.storePassword = storePassword
-        this.keyAlias = keyAliasEnv
-        this.keyPassword = keyPassword
+        storePassword = releaseStorePassword
+        keyAlias = releaseKeyAlias
+        keyPassword = releaseKeyPassword
+        enableV1Signing = true
+        enableV2Signing = true
+        enableV3Signing = true
       }
     }
   }
@@ -71,25 +100,30 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      if (hasReleaseSigning) {
+      if (hasCompleteReleaseSigning) {
         signingConfig = signingConfigs.getByName("release")
       } else {
-        // Enforce failure if release assembly is requested without signing credentials
+        // Enforce failure if assembleRelease or bundleRelease is invoked without signing credentials
         gradle.taskGraph.whenReady {
           val hasReleaseTask = allTasks.any { 
             it.name.contains("Release", ignoreCase = true) && !it.name.contains("UnitTest", ignoreCase = true)
           }
           if (hasReleaseTask) {
+            val missing = mutableListOf<String>()
+            if (releaseKeystorePath.isNullOrBlank()) missing.add("KEYSTORE_PATH")
+            if (releaseStorePassword.isNullOrBlank()) missing.add("STORE_PASSWORD")
+            if (releaseKeyPassword.isNullOrBlank()) missing.add("KEY_PASSWORD")
             throw GradleException(
-              "Release signing credentials missing! KEYSTORE_PATH, STORE_PASSWORD, and KEY_PASSWORD " +
-              "environment variables must all be set for release builds."
+              "Release signing credentials missing! The following required properties were not found " +
+              "in environment variables or keystore.properties: [${missing.joinToString()}]. " +
+              "Release builds must be signed with the permanent release keystore so updates can install over old versions."
             )
           }
         }
       }
     }
     debug {
-      // Default Android debug signing is used automatically
+      // Default Android debug keystore is used automatically (~/.android/debug.keystore)
     }
   }
 
@@ -106,6 +140,72 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+}
+
+abstract class PrintSigningInfoTask : DefaultTask() {
+  @get:Input
+  abstract val rootDirectoryPath: Property<String>
+
+  @TaskAction
+  fun printInfo() {
+    val ksPath = System.getenv("KEYSTORE_PATH")
+    val storePass = System.getenv("STORE_PASSWORD")
+    val alias = System.getenv("KEY_ALIAS") ?: "upload"
+
+    val propsFile = File(rootDirectoryPath.get(), "keystore.properties")
+    val props = Properties().apply {
+      if (propsFile.exists()) {
+        propsFile.inputStream().use { load(it) }
+      }
+    }
+
+    val finalKsPath = ksPath ?: props.getProperty("KEYSTORE_PATH") ?: props.getProperty("storeFile")
+    val finalStorePass = storePass ?: props.getProperty("STORE_PASSWORD") ?: props.getProperty("storePassword")
+    val finalAlias = alias ?: props.getProperty("KEY_ALIAS") ?: props.getProperty("keyAlias") ?: "upload"
+
+    if (finalKsPath.isNullOrBlank() || finalStorePass.isNullOrBlank()) {
+      println("ERROR: Release signing credentials are not configured. Provide KEYSTORE_PATH and STORE_PASSWORD via environment variables or keystore.properties.")
+      return
+    }
+
+    val ksFile = File(finalKsPath)
+    if (!ksFile.exists()) {
+      println("ERROR: Keystore file does not exist at: ${ksFile.absolutePath}")
+      return
+    }
+
+    val process = ProcessBuilder(
+      "keytool",
+      "-list",
+      "-v",
+      "-keystore", ksFile.absolutePath,
+      "-alias", finalAlias,
+      "-storepass", finalStorePass
+    ).redirectErrorStream(true).start()
+
+    val output = process.inputStream.bufferedReader().use { it.readText() }
+    process.waitFor()
+
+    println("\n=== Game Turbo Release Keystore Information ===")
+    println("Keystore path : ${ksFile.absolutePath}")
+    println("Key alias     : $finalAlias")
+    output.lines().filter { 
+      it.contains("Owner:", ignoreCase = true) ||
+      it.contains("Issuer:", ignoreCase = true) ||
+      it.contains("Serial number:", ignoreCase = true) ||
+      it.contains("Valid from:", ignoreCase = true) ||
+      it.contains("SHA256:", ignoreCase = true) ||
+      it.contains("SHA-256:", ignoreCase = true) ||
+      it.contains("MD5:", ignoreCase = true)
+    }.forEach { println(it.trim()) }
+    println("================================================\n")
+  }
+}
+
+tasks.register<PrintSigningInfoTask>("printSigningInfo") {
+  description = "Prints the SHA-256 certificate fingerprint of the release keystore without exposing passwords."
+  group = "help"
+  rootDirectoryPath.set(rootProject.layout.projectDirectory.asFile.absolutePath)
 }
 
 dependencies {

@@ -69,5 +69,6 @@ data class SystemSnapshotRecord(
     val originalValue: String,
     val isAbsentOriginally: Boolean = false,
     val appliedValue: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val extraMetadata: String = ""
 )

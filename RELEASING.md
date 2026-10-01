@@ -1,107 +1,125 @@
-# Releasing Game Turbo / دليل نشر وتحديث التطبيق
+# Game Turbo - Release & In-Place Update Guide / دليل النشر وتحديث التطبيق المباشر
 
 ---
 
 ## English Guide
 
-### Automated Release (Recommended via GitHub Actions)
-1. Edit `version.properties` in the project root: change `APP_VERSION` to the next whole number (e.g. `1` -> `2`).
-2. Update `RELEASE_NOTES.md` with the new changes under `# Game Turbo v<N>`.
-3. Commit and push the changes:
-   ```bash
-   git add version.properties RELEASE_NOTES.md
-   git commit -m "Prepare release v2"
-   git push origin main
-   ```
-4. Create and push the corresponding git tag:
-   ```bash
-   git tag v2
-   git push origin v2
-   ```
-5. GitHub Actions workflow `.github/workflows/release.yml` will automatically verify that the tag matches `version.properties`, build the signed release APK `Game-Turbo-v2.apk`, and publish the GitHub Release titled **"Game Turbo v2"**.
+### 1. Generating Your Permanent Release Keystore (ONCE ONLY)
+Generate your permanent upload keystore using the command:
+```bash
+keytool -genkeypair -v -keystore my-upload-key.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000
+```
+> ⚠️ **CRITICAL SECURITY WARNING:**
+> Back up your `my-upload-key.jks` file and its passwords in at least two separate, secure places (e.g., encrypted cloud storage + offline USB drive).
+> **If this keystore file or its password is lost or replaced, Android will permanently refuse all future updates over existing installations.**
 
 ---
 
-### Required GitHub Secrets
-To allow GitHub Actions to sign the release APK, configure these repository secrets in **Settings > Secrets and variables > Actions**:
-1. `KEYSTORE_BASE64`: Base64 string of your keystore file. Generate with:
+### 2. Verifying Signature Match Before Publishing
+Android enforces that updates must have the exact same signing certificate. Before publishing any new APK, compare its certificate signature with the currently installed or previously published APK using `apksigner`:
+```bash
+apksigner verify --print-certs old.apk
+apksigner verify --print-certs new.apk
+```
+Look for the `Signer #1 certificate SHA-256 digest` output. **Both lines must be 100% identical.**
+If the fingerprints differ, Android will reject the update with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
+---
+
+### 3. Testing In-Place Update on Device (`adb install -r`)
+To test upgrading over an existing installation without losing user data, run:
+```bash
+adb install -r Game-Turbo-v2.apk
+```
+Common adb errors:
+- `INSTALL_FAILED_UPDATE_INCOMPATIBLE`: The new APK was signed with a different key than the one on the device.
+- `INSTALL_FAILED_VERSION_DOWNGRADE`: The `versionCode` of the new APK is not strictly greater than the currently installed one.
+
+---
+
+### 4. Pre-Release Checklist
+Before releasing any update, verify:
+- [ ] **Same Keystore**: Built using the permanent `my-upload-key.jks` (same SHA-256 certificate digest).
+- [ ] **Higher versionCode**: `APP_VERSION` in `version.properties` increased by 1 (e.g. 1 -> 2).
+- [ ] **Unchanged applicationId**: Stays `com.aistudio.pubgbooster.remix` (no suffixes).
+- [ ] **In-Place Upgrade Verified**: Tested on a real device with `adb install -r` and verified that Room database, game list, logs, snapshots, and preferences remain intact.
+- [ ] **Release Notes Updated**: `RELEASE_NOTES.md` edited with the new version changes.
+
+---
+
+### 5. One-Time Uninstall Note
+If a user or tester currently has an old debug build or an APK signed with an ad-hoc key, Android will block the new official release. The user must perform a **one-time uninstall** of the old non-production build. After installing the official release, all future updates will install seamlessly in-place over it.
+
+---
+
+### 6. Automated Publishing via GitHub Actions
+1. Encode your `my-upload-key.jks` to base64:
    ```bash
    base64 -w 0 my-upload-key.jks
    ```
-2. `STORE_PASSWORD`: The keystore password.
-3. `KEY_PASSWORD`: The private key password.
-
----
-
-### Manual Release Alternative
-If you prefer building and publishing manually:
-1. Provide the signing environment variables locally and run:
-   ```bash
-   KEYSTORE_PATH=/path/to/my-upload-key.jks STORE_PASSWORD="your_store_pass" KEY_PASSWORD="your_key_pass" ./gradlew assembleRelease
-   ```
-2. The generated APK will be at `app/build/outputs/apk/release/Game-Turbo-v<N>.apk`.
-3. On GitHub: go to **Releases > Draft a new release**:
-   - Tag: `v<N>` (e.g. `v2`)
-   - Release title: `Game Turbo v<N>` (e.g. `Game Turbo v2`)
-   - Description: Copy from `RELEASE_NOTES.md`
-   - Upload asset: `Game-Turbo-v<N>.apk`
-   - Click **Publish release**.
-
----
-
-### ⚠️ Critical Android Warnings
-- **Version Number**: Android enforces that updates can only be installed if `versionCode` is strictly higher than the installed version. The version number must always increase (1 -> 2 -> 3).
-- **Keystore Consistency**: You must ALWAYS use the exact same keystore and key alias for all releases. If a release is signed with a different key, Android will refuse to update the installed app with the error *"App not installed as package appears to be corrupt / signature mismatch"*, requiring users to uninstall and lose their data.
+2. In GitHub repository **Settings > Secrets and variables > Actions**, add:
+   - `KEYSTORE_BASE64`: The full base64 string.
+   - `STORE_PASSWORD`: Keystore password.
+   - `KEY_PASSWORD`: Key password.
+   - `KEY_ALIAS`: `upload` (optional, defaults to `upload`).
+3. To publish version N:
+   - Update `APP_VERSION` in `version.properties` (e.g. `2`).
+   - Update `RELEASE_NOTES.md`.
+   - Commit, push, tag and push:
+     ```bash
+     git add version.properties RELEASE_NOTES.md
+     git commit -m "Release v2"
+     git push origin main
+     git tag v2
+     git push origin v2
+     ```
+   The workflow `.github/workflows/release.yml` will automatically build, verify, sign, and publish **Game Turbo v2** with `Game-Turbo-v2.apk`.
 
 ---
 
 ## الدليل باللغة العربية (Arabic Guide)
 
-### النشر التلقائي عبر GitHub Actions (الطريقة الموصى بها)
-1. افتح ملف `version.properties` في جذر المشروع، وغيّر رقم `APP_VERSION` إلى الرقم التالي مباشرة (مثلاً من `1` إلى `2`).
-2. اكتب ملاحظات التحديث الجديد داخل ملف `RELEASE_NOTES.md` تحت العنوان `# Game Turbo v2`.
-3. احفظ التغييرات وادفعها للفرع الرئيسي:
-   ```bash
-   git add version.properties RELEASE_NOTES.md
-   git commit -m "Prepare release v2"
-   git push origin main
-   ```
-4. أنشئ الـ Tag وارفعه إلى GitHub:
-   ```bash
-   git tag v2
-   git push origin v2
-   ```
-5. سيبدأ سير عمل GitHub Actions تلقائياً بالتحقق من تطابق الـ Tag مع ملف `version.properties`، ثم بناء الحزمة الموقعة `Game-Turbo-v2.apk` ونشر الإصدار بعنوان **"Game Turbo v2"**.
+### 1. إنشاء مفتاح التوقيع الدائم (يُنشأ مرة واحدة فقط)
+أنشئ ملف المفاتيح الدائم عبر سطر الأوامر:
+```bash
+keytool -genkeypair -v -keystore my-upload-key.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000
+```
+> ⚠️ **تحذير أمني شديد الأهمية:**
+> احفظ نسخة احتياطية من ملف `my-upload-key.jks` وكلمات المرور في مكانين آمنين على الأقل (مثل وحدة تخزين سحابية مشفرة + ذاكرة فلاش offline).
+> **في حال فقدان هذا المفتاح، سيرفض نظام أندرويد نهائياً تثبيت أي تحديث قادم فوق النسخة القديمة، وسيُجبر المستخدمون على حذف التطبيق وفقدان بياناتهم.**
 
 ---
 
-### أسرار GitHub المطلوبة (GitHub Secrets)
-لتوقيع التطبيق تلقائياً في GitHub Actions، أضف الأسرار التالية في مستودع GitHub من **Settings > Secrets and variables > Actions**:
-1. `KEYSTORE_BASE64`: تشفير ملف مفتاح التوقيع Base64. يمكنك إنشاؤه عبر الأمر:
-   ```bash
-   base64 -w 0 my-upload-key.jks
-   ```
-2. `STORE_PASSWORD`: كلمة مرور ملف الـ Keystore.
-3. `KEY_PASSWORD`: كلمة مرور المفتاح الخاص داخل الـ Keystore.
+### 2. مطابقة التوقيع الرقمي قبل النشر
+يشترط أندرويد تطابق شهادة التوقيع لقبول التحديث. قارن توقيع النسخة القديمة بالجديدة عبر أداة `apksigner`:
+```bash
+apksigner verify --print-certs old.apk
+apksigner verify --print-certs new.apk
+```
+تحقق من سطر `SHA-256 digest`؛ **يجب أن يكون السطران متطابقين تماماً بحرف بحرف.** إذا اختلف التوقيع، سيرفض الهاتف التثبيت فوراً بخطأ `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
 
 ---
 
-### طريقة النشر اليدوي (البديلة)
-إذا أردت البناء والنشر بنفسك:
-1. مرر متغيرات بيئة التوقيع وشغّل أمر البناء في جهازك:
-   ```bash
-   KEYSTORE_PATH=/path/to/my-upload-key.jks STORE_PASSWORD="your_store_pass" KEY_PASSWORD="your_key_pass" ./gradlew assembleRelease
-   ```
-2. ستجد ملف الحزمة الناتج في المسار: `app/build/outputs/apk/release/Game-Turbo-v<N>.apk`.
-3. على GitHub: ادخل إلى **Releases > Draft a new release**:
-   - اسم الـ Tag: `v<N>` (مثل `v2`)
-   - عنوان الإصدار: `Game Turbo v<N>` (مثل `Game Turbo v2`)
-   - الوصف: انسخ محتوى `RELEASE_NOTES.md`
-   - ارفع الملف: `Game-Turbo-v<N>.apk`
-   - اضغط **Publish release**.
+### 3. اختبار التحديث المباشر على الهاتف (`adb install -r`)
+لاختبار التثبيت فوق النسخة الحالية دون فقدان البيانات:
+```bash
+adb install -r Game-Turbo-v2.apk
+```
+معاني أخطاء التثبيت الشائعة:
+- `INSTALL_FAILED_UPDATE_INCOMPATIBLE`: التطبيق الجديد موقع بمفتاح مختلف عن المفتاح المثبت على الهاتف.
+- `INSTALL_FAILED_VERSION_DOWNGRADE`: رقم `versionCode` في التحديث الجديد ليس أعلى من النسخة المثبتة.
 
 ---
 
-### ⚠️ تنبيهات هامة لنظام أندرويد
-- **رقم الإصدار**: يشترط نظام أندرويد أن يكون `versionCode` أعلى دائماً من النسخة المثبتة على الهاتف حتى يقبل التحديث، لذا يجب زيادة الرقم دائماً (1 ثم 2 ثم 3).
-- **ملف المفاتيح (Keystore)**: يجب الحفاظ على نفس ملف المفتاح `my-upload-key.jks` ونفس كلمات المرور لكافة التحديثات القادمة. تغيير المفتاح سيجعل هواتف المستخدمين ترفض تثبيت التحديث لوجود تضارب في التوقيع الرقمي.
+### 4. قائمة التحقق قبل النشر (Pre-release Checklist)
+قبل إرسال التحديث للمستخدمين:
+- [ ] **نفس المفتاح الدائم**: الحزمة موقعة بنفس ملف `my-upload-key.jks`.
+- [ ] **رقم الإصدار أعلى**: زاد رقم `APP_VERSION` في `version.properties` بمقدار 1.
+- [ ] **ثبات معرف التطبيق**: المعرف لا يزال `com.aistudio.pubgbooster.remix`.
+- [ ] **اختبار التحديث**: تم التثبيت بـ `adb install -r` فوق النسخة السابقة وتأكيد بقاء قاعدة البيانات والإعدادات وسجلات الجلسات كما هي.
+- [ ] **تحديث الملاحظات**: كتابة جديد الإصدار في `RELEASE_NOTES.md`.
+
+---
+
+### 5. تنبيه الحذف لمرة واحدة (One-Time Uninstall)
+إذا كان هاتف المستخدم مثبتاً عليه حالياً نسخة تجريبية (Debug) أو حزمة موقعة بمفتاح عشوائي سابق، يجب حذف تلك النسخة القديمة لمرة واحدة فقط وتثبيت هذه النسخة الموقعة بالمفتاح الدائم. بعد ذلك، ستثبت كافة التحديثات القادمة فوقها مباشرة وبسلاسة تامة.

@@ -102,6 +102,7 @@ jobs:
           KEYSTORE_PATH: ${{ steps.keystore_prep.outputs.keystore_path }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'upload' }}
         run: |
           echo "=== Step 3: Compiling Release APK with Gradle ==="
           chmod +x ./gradlew
@@ -112,35 +113,72 @@ jobs:
         run: |
           echo "=== Step 4: Verifying Release APK Output ==="
           APP_VER="${{ steps.verify_version.outputs.app_version }}"
+          OUTPUT_DIR="app/build/outputs/apk/release"
+          APK_COUNT=0
+          FAILED=0
+          PRIMARY_APK=""
 
-          # Locate the release APK produced by the build
-          APK_PATH=$(find app/build/outputs/apk/release -type f -name "*.apk" | head -n 1)
+          while IFS= read -r apk; do
+            [ -z "$apk" ] && continue
+            APK_COUNT=$((APK_COUNT + 1))
 
-          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            echo "::error::Build completed but no release APK file was found in app/build/outputs/apk/release!"
+            if [ ! -f "$apk" ]; then
+              echo "::error::File does not exist: $apk"
+              FAILED=1
+              continue
+            fi
+
+            FILE_SIZE=$(stat -c%s "$apk" 2>/dev/null || wc -c < "$apk")
+            if [ "$FILE_SIZE" -le 0 ]; then
+              echo "::error::Release APK file $apk is empty (size: $FILE_SIZE bytes)!"
+              FAILED=1
+              continue
+            fi
+
+            if [ "$FILE_SIZE" -lt 1000000 ]; then
+              echo "::error::Release APK file $apk is suspiciously small ($FILE_SIZE bytes)!"
+              FAILED=1
+              continue
+            fi
+
+            SHA256_HASH=$(sha256sum "$apk" | awk '{print $1}')
+            echo "----------------------------------------"
+            echo "Release APK : $apk"
+            echo "Size        : $FILE_SIZE bytes"
+            echo "SHA-256     : $SHA256_HASH"
+            echo "----------------------------------------"
+
+            if [ -z "$PRIMARY_APK" ]; then
+              PRIMARY_APK="$apk"
+            fi
+          done < <(find "$OUTPUT_DIR" -type f -name "*.apk" 2>/dev/null)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "::error::No release APK files found in $OUTPUT_DIR!"
+            echo "=== Directory listing of app/build/outputs/apk ==="
+            ls -R app/build/outputs/apk || true
             exit 1
           fi
 
-          echo "Found release APK: $APK_PATH"
-          FILE_SIZE=$(stat -c%s "$APK_PATH")
-          echo "APK file size: $FILE_SIZE bytes"
-
-          if [ "$FILE_SIZE" -lt 1000000 ]; then
-            echo "::error::APK file size ($FILE_SIZE bytes) is suspiciously small. Aborting release."
+          if [ $FAILED -ne 0 ]; then
+            echo "::error::One or more release APK files failed verification!"
+            echo "=== Directory listing of app/build/outputs/apk ==="
+            ls -R app/build/outputs/apk || true
             exit 1
           fi
 
           # Target asset name: Game-Turbo-v<APP_VERSION>.apk
           ASSET_NAME="Game-Turbo-v${APP_VER}.apk"
-          ASSET_PATH="app/build/outputs/apk/release/$ASSET_NAME"
+          ASSET_PATH="$OUTPUT_DIR/$ASSET_NAME"
 
-          if [ "$APK_PATH" != "$ASSET_PATH" ]; then
-            echo "Copying $APK_PATH to $ASSET_PATH for standardized release asset naming..."
-            cp "$APK_PATH" "$ASSET_PATH"
+          if [ "$PRIMARY_APK" != "$ASSET_PATH" ]; then
+            echo "Copying $PRIMARY_APK to $ASSET_PATH for standardized release asset naming..."
+            cp "$PRIMARY_APK" "$ASSET_PATH"
           fi
 
           echo "apk_asset_path=$ASSET_PATH" >> $GITHUB_OUTPUT
           echo "apk_asset_name=$ASSET_NAME" >> $GITHUB_OUTPUT
+          echo "SUCCESS: Verified $APK_COUNT release APK file(s) successfully."
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -60,7 +60,7 @@ class BoosterViewModel(
     val frameMonitor = FrameTimeMonitor()
     val thermalEngine = ThermalGuardEngine(application)
     val networkEngine = NetworkStabilityEngine(application)
-    val statusEngine = OptimizationStatusEngine(application, boosterDao)
+    val statusEngine = OptimizationStatusEngine(application, boosterDao, shizukuEngine, networkEngine)
 
     private val _featureTestResults = MutableStateFlow<List<FeatureTestResult>>(statusEngine.getInitialFeatureList())
     val featureTestResults: StateFlow<List<FeatureTestResult>> = _featureTestResults.asStateFlow()
@@ -215,6 +215,26 @@ class BoosterViewModel(
 
     init {
         viewModelScope.launch {
+            // Check for in-place app update and log real transition
+            val prevVersion = prefsManager.checkAndRecordAppUpdate(com.example.BuildConfig.VERSION_CODE)
+            if (prevVersion != null) {
+                logOperation(
+                    name = "App Update",
+                    text = "System Package Upgrade",
+                    stats = "SUCCESS",
+                    msg = "App updated from version $prevVersion to ${com.example.BuildConfig.VERSION_CODE}"
+                )
+                boosterDao.insertEvent(
+                    DiagnosticEventRecord(
+                        sessionId = 0L,
+                        eventType = "UPDATE",
+                        title = "App Updated",
+                        description = "Successfully upgraded in-place from version $prevVersion to ${com.example.BuildConfig.VERSION_CODE}. User settings, database and logs preserved.",
+                        severity = "INFO"
+                    )
+                )
+            }
+
             // Check for interrupted session recovery on startup
             val recoveryReport = sessionManager.checkForInterruptedSession()
             if (recoveryReport != null) {
@@ -548,7 +568,7 @@ class BoosterViewModel(
                 _cpuLoad.value = CpuUsageSampler.sampleCpuUsage()
 
                 // 4. Genuine Game FPS from SurfaceFlinger
-                _gameFps.value = GameFpsSampler.sampleGameFps(selectedGamePackage.value)
+                _gameFps.value = GameFpsSampler.sampleGameFps(app, selectedGamePackage.value)
 
                 // 5. Genuine App UI FPS from Choreographer
                 _appUiFps.value = frameMonitor.timingStats.value.appUiFps

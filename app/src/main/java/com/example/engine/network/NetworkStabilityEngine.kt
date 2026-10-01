@@ -11,9 +11,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.Random
 import kotlin.math.abs
 
 data class PingSample(
@@ -42,9 +45,16 @@ data class NetworkQualityProfile(
 
 data class DnsBenchmarkResult(
     val providerName: String,
-    val host: String,
-    val latencyMs: Long? // null if resolution timed out / failed
-)
+    val ip: String,
+    val dotHostname: String,
+    val medianMs: Long?,
+    val minMs: Long?,
+    val lostCount: Int,
+    val samplesCount: Int = 4
+) {
+    val host: String get() = dotHostname
+    val latencyMs: Long? get() = medianMs
+}
 
 class NetworkStabilityEngine(private val context: Context) {
     private val _networkProfile = MutableStateFlow(NetworkQualityProfile())
@@ -58,9 +68,11 @@ class NetworkStabilityEngine(private val context: Context) {
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             networkChangeCounter++
+            updateTransportState()
         }
         override fun onLost(network: Network) {
             networkChangeCounter++
+            updateTransportState()
         }
     }
 
@@ -72,6 +84,7 @@ class NetworkStabilityEngine(private val context: Context) {
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
             connectivityManager?.registerNetworkCallback(request, networkCallback)
+            updateTransportState()
         } catch (_: Throwable) {}
     }
 
@@ -83,15 +96,26 @@ class NetworkStabilityEngine(private val context: Context) {
     }
 
     /**
-     * Measures genuine TCP connect RTT against a target host on port 443.
+     * Measures genuine TCP connect RTT against a target host on port 443 (Fix A18: resolve first, time only connect).
      * Records a packet loss when connection fails. NEVER returns a fake number.
      */
     suspend fun sampleRtt(host: String = "1.1.1.1", port: Int = 443, timeoutMs: Int = 1500): Int? = withContext(Dispatchers.IO) {
-        val start = System.currentTimeMillis()
+        // Resolve address first so DNS time is not counted in TCP connect RTT
+        val address = try {
+            InetAddress.getByName(host)
+        } catch (_: Throwable) {
+            null
+        } ?: run {
+            withContext(Dispatchers.Main) { recordSample(null, host) }
+            return@withContext null
+        }
+
+        val socketAddress = InetSocketAddress(address, port)
         var socket: Socket? = null
+        val start = System.currentTimeMillis()
         val measuredRtt: Int? = try {
             socket = Socket()
-            socket.connect(InetSocketAddress(host, port), timeoutMs)
+            socket.connect(socketAddress, timeoutMs)
             (System.currentTimeMillis() - start).toInt()
         } catch (_: Throwable) {
             null // Real connection failure / timeout
@@ -103,6 +127,41 @@ class NetworkStabilityEngine(private val context: Context) {
             recordSample(measuredRtt, host)
         }
         measuredRtt
+    }
+
+    private fun updateTransportState() {
+        var transport = "No Connection"
+        var linkSpeed: Int? = null
+        var rssi: Int? = null
+
+        try {
+            val activeNet = connectivityManager?.activeNetwork
+            val caps = connectivityManager?.getNetworkCapabilities(activeNet)
+            if (caps != null) {
+                transport = when {
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Cellular"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
+                    else -> "Connected"
+                }
+
+                if (transport == "Wi-Fi") {
+                    val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    val wifiInfo = wifiManager?.connectionInfo
+                    if (wifiInfo != null && wifiInfo.networkId != -1) {
+                        linkSpeed = if (wifiInfo.linkSpeed > 0) wifiInfo.linkSpeed else null
+                        rssi = wifiInfo.rssi
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
+
+        _networkProfile.value = _networkProfile.value.copy(
+            activeTransport = transport,
+            wifiLinkSpeedMbps = linkSpeed,
+            wifiRssi = rssi
+        )
     }
 
     private fun recordSample(rtt: Int?, endpoint: String) {
@@ -131,26 +190,14 @@ class NetworkStabilityEngine(private val context: Context) {
 
         // Genuine network integrity verdict
         val verdict = when {
-            avg == null -> "NO_CONNECTION"
+            validSamples.isEmpty() -> "NO_CONNECTION"
             (packetLossPercent ?: 0.0) > 5.0 -> "UNSTABLE"
-            avg <= 50 -> "OPTIMAL"
-            avg <= 90 -> "MODERATE"
+            avg != null && avg <= 50 -> "OPTIMAL"
+            avg != null && avg <= 90 -> "MODERATE"
             else -> "ELEVATED"
         }
 
-        // Active Transport details
-        var transport = "Cellular"
-        var linkSpeed: Int? = null
-        var rssi: Int? = null
-        try {
-            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            val wifiInfo = wifiManager?.connectionInfo
-            if (wifiInfo != null && wifiInfo.networkId != -1) {
-                transport = "Wi-Fi"
-                linkSpeed = if (wifiInfo.linkSpeed > 0) wifiInfo.linkSpeed else null
-                rssi = wifiInfo.rssi
-            }
-        } catch (_: Throwable) {}
+        updateTransportState()
 
         _networkProfile.value = _networkProfile.value.copy(
             currentRttMs = rtt,
@@ -162,49 +209,164 @@ class NetworkStabilityEngine(private val context: Context) {
             samplesCount = totalTaken,
             lostSamplesCount = lostCount,
             networkChangesCount = networkChangeCounter,
-            activeTransport = transport,
-            wifiLinkSpeedMbps = linkSpeed,
-            wifiRssi = rssi,
             integrityVerdict = verdict
         )
     }
 
     /**
-     * Genuinely benchmarks DNS resolution latency against candidates.
+     * Genuinely benchmarks DNS providers via direct UDP port 53 query packets (Fix A5).
+     * Discards 1st warm-up sample, measures 4 samples, returns median and lost count.
      */
     suspend fun benchmarkDnsCandidates(): List<DnsBenchmarkResult> = withContext(Dispatchers.IO) {
         val candidates = listOf(
-            "Cloudflare" to "one.one.one.one",
-            "Google" to "dns.google",
-            "Quad9" to "dns.quad9.net",
-            "AdGuard" to "dns.adguard.com"
+            Triple("Cloudflare", "1.1.1.1", "one.one.one.one"),
+            Triple("Google", "8.8.8.8", "dns.google"),
+            Triple("Quad9", "9.9.9.9", "dns.quad9.net"),
+            Triple("AdGuard", "94.140.14.14", "dns.adguard.com")
         )
-        val results = mutableListOf<DnsBenchmarkResult>()
-        for ((name, host) in candidates) {
-            val latency = testDnsResolutionLatency(host)
-            results.add(DnsBenchmarkResult(providerName = name, host = host, latencyMs = latency))
-        }
 
-        // Find winner with real lowest latency
-        val validResults = results.filter { it.latencyMs != null }
-        val fastest = validResults.minByOrNull { it.latencyMs!! }
-        if (fastest != null) {
-            _networkProfile.value = _networkProfile.value.copy(
-                fastestDnsHost = fastest.host,
-                fastestDnsLatencyMs = fastest.latencyMs
+        val results = mutableListOf<DnsBenchmarkResult>()
+
+        for ((name, ip, dotHost) in candidates) {
+            val measuredLatencies = mutableListOf<Long>()
+            var lostCount = 0
+
+            // 5 samples total: 1 warm-up + 4 measured
+            for (i in 0 until 5) {
+                val latency = sendUdpDnsQuery(ip, "cloudflare.com", timeoutMs = 1000)
+                if (i > 0) { // discard warm-up sample 0
+                    if (latency != null) {
+                        measuredLatencies.add(latency)
+                    } else {
+                        lostCount++
+                    }
+                }
+            }
+
+            val median = if (measuredLatencies.isNotEmpty()) {
+                val sorted = measuredLatencies.sorted()
+                sorted[sorted.size / 2]
+            } else null
+
+            val min = measuredLatencies.minOrNull()
+
+            results.add(
+                DnsBenchmarkResult(
+                    providerName = name,
+                    ip = ip,
+                    dotHostname = dotHost,
+                    medianMs = median,
+                    minMs = min,
+                    lostCount = lostCount,
+                    samplesCount = 4
+                )
             )
         }
+
+        // Find fastest winner among valid responses
+        val validResults = results.filter { it.medianMs != null }
+        val fastest = validResults.minByOrNull { it.medianMs!! }
+        if (fastest != null) {
+            _networkProfile.value = _networkProfile.value.copy(
+                fastestDnsHost = fastest.dotHostname,
+                fastestDnsLatencyMs = fastest.medianMs
+            )
+        }
+
         results
     }
 
-    private fun testDnsResolutionLatency(host: String): Long? {
-        val start = System.currentTimeMillis()
+    /**
+     * Builds and sends a real UDP DNS A-record query directly to target IP on port 53 (Fix A5).
+     */
+    private fun sendUdpDnsQuery(serverIp: String, domain: String, timeoutMs: Int): Long? {
+        var socket: DatagramSocket? = null
         return try {
-            val addr = InetAddress.getByName(host)
-            if (addr != null) System.currentTimeMillis() - start else null
+            val random = Random()
+            val queryId = random.nextInt(65535)
+
+            val queryBytes = buildDnsQueryPacket(queryId, domain)
+            val serverAddr = InetAddress.getByName(serverIp)
+
+            socket = DatagramSocket().apply {
+                soTimeout = timeoutMs
+            }
+
+            val sendPacket = DatagramPacket(queryBytes, queryBytes.size, serverAddr, 53)
+            val receiveBuffer = ByteArray(512)
+            val receivePacket = DatagramPacket(receiveBuffer, receiveBuffer.size)
+
+            val start = System.currentTimeMillis()
+            socket.send(sendPacket)
+            socket.receive(receivePacket)
+            val elapsed = System.currentTimeMillis() - start
+
+            val responseData = receivePacket.data
+            if (receivePacket.length < 12) return null
+
+            // Validate response ID matches query ID
+            val respId = ((responseData[0].toInt() and 0xFF) shl 8) or (responseData[1].toInt() and 0xFF)
+            if (respId != queryId) return null
+
+            // Validate RCODE is 0 (No error)
+            val flags = ((responseData[2].toInt() and 0xFF) shl 8) or (responseData[3].toInt() and 0xFF)
+            val rcode = flags and 0x0F
+            if (rcode != 0) return null
+
+            elapsed
         } catch (_: Throwable) {
             null
+        } finally {
+            try { socket?.close() } catch (_: Throwable) {}
         }
+    }
+
+    private fun buildDnsQueryPacket(queryId: Int, domain: String): ByteArray {
+        val out = mutableListOf<Byte>()
+
+        // 1. Transaction ID (2 bytes)
+        out.add(((queryId shr 8) and 0xFF).toByte())
+        out.add((queryId and 0xFF).toByte())
+
+        // 2. Flags: Standard query, recursion desired (0x0100) (2 bytes)
+        out.add(0x01.toByte())
+        out.add(0x00.toByte())
+
+        // 3. QDCOUNT: 1 question (2 bytes)
+        out.add(0x00.toByte())
+        out.add(0x01.toByte())
+
+        // 4. ANCOUNT: 0 (2 bytes)
+        out.add(0x00.toByte())
+        out.add(0x00.toByte())
+
+        // 5. NSCOUNT: 0 (2 bytes)
+        out.add(0x00.toByte())
+        out.add(0x00.toByte())
+
+        // 6. ARCOUNT: 0 (2 bytes)
+        out.add(0x00.toByte())
+        out.add(0x00.toByte())
+
+        // 7. QNAME (Labels)
+        val labels = domain.split('.')
+        for (label in labels) {
+            out.add(label.length.toByte())
+            for (char in label) {
+                out.add(char.code.toByte())
+            }
+        }
+        out.add(0x00.toByte()) // Null label terminator
+
+        // 8. QTYPE: A (0x0001) (2 bytes)
+        out.add(0x00.toByte())
+        out.add(0x01.toByte())
+
+        // 9. QCLASS: IN (0x0001) (2 bytes)
+        out.add(0x00.toByte())
+        out.add(0x01.toByte())
+
+        return out.toByteArray()
     }
 
     fun clearSamples() {

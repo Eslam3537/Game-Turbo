@@ -4,8 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -23,7 +25,7 @@ import com.example.data.AdbCommandRunner
 import com.example.data.AppPreferencesManager
 import com.example.engine.performance.HardwareThermalSampler
 import com.example.engine.performance.SurfaceFlingerFpsEngine
-import com.example.util.PermissionManager
+import com.example.engine.performance.ThermalSample
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,30 +34,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 data class RealMonitorMetrics(
     val fps: Int? = null,
-    val tempCelsius: Double? = null,
+    val thermalSample: ThermalSample? = null,
     val isShizukuReady: Boolean = false,
     val errorMessage: String? = null,
     val isUpdating: Boolean = false
 )
 
 /**
- * Floating FPS and Temperature Monitor Service.
- *
- * Displays a lightweight, non-intrusive floating HUD exclusively displaying:
- * ┌─────────────────┐
- * │ FPS 60   🌡 38°C │
- * └─────────────────┘
- *
- * Features:
- * - Shell UID 2000 execution via Shizuku.
- * - Non-root, no game modification, no code injection.
- * - TYPE_APPLICATION_OVERLAY with FLAG_NOT_FOCUSABLE so PUBG retains 100% focus.
- * - Draggable with position persistence in SharedPreferences.
- * - Real SurfaceFlinger TimeStats & Latency measurement.
- * - Real hardware thermal sensor queries.
- * - Color-coded indicators:
- *   * FPS: Green >= 55, Yellow 30-54, Red < 30
- *   * Temp: Green < 38°C, Yellow 38-42°C, Red > 42°C
+ * Floating FPS and Temperature Monitor Service (Fix A2, A14).
+ * - 2-second sampling interval (Fix A2).
+ * - Stops sampling when screen is off (Fix A14).
+ * - Displays explicit thermal sensor label: "CPU 52°C" or "Battery 38°C".
+ * - Allows stale FPS for at most 3 seconds, then shows "FPS —" (N/A).
  */
 class FloatingMonitorService : Service() {
     private var windowManager: WindowManager? = null
@@ -75,8 +65,8 @@ class FloatingMonitorService : Service() {
     private var initialTouchY = 0f
 
     private val isSampling = AtomicBoolean(false)
-    private var lastValidFps: Int? = null
-    private var lastValidTemp: Double? = null
+    private var isScreenOn = true
+    private var screenReceiver: BroadcastReceiver? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -84,6 +74,7 @@ class FloatingMonitorService : Service() {
         super.onCreate()
         prefsManager = AppPreferencesManager(applicationContext)
         startForegroundNotification()
+        registerScreenStateReceiver()
 
         if (Settings.canDrawOverlays(this)) {
             initFloatingOverlay()
@@ -95,59 +86,81 @@ class FloatingMonitorService : Service() {
         }
     }
 
+    private fun registerScreenStateReceiver() {
+        screenReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        isScreenOn = false
+                        Log.d(TAG, "Screen off: pausing overlay sampling")
+                    }
+                    Intent.ACTION_SCREEN_ON -> {
+                        isScreenOn = true
+                        Log.d(TAG, "Screen on: resuming overlay sampling")
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        registerReceiver(screenReceiver, filter)
+    }
+
     private fun startForegroundNotification() {
         val channelId = "game_turbo_fps_monitor"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
-                "Floating FPS & Temp Monitor",
+                "HUD Floating Monitor",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Active floating HUD over gameplay"
+                description = "Shows live FPS and thermal status in a compact floating overlay"
                 setShowBadge(false)
             }
-            val nm = getSystemService(NotificationManager::class.java)
-            nm?.createNotificationChannel(channel)
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            manager?.createNotificationChannel(channel)
         }
+
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Floating FPS & Temp Monitor")
-            .setContentText("Monitoring live SurfaceFlinger FPS & Hardware Temperature")
-            .setSmallIcon(com.example.R.mipmap.ic_launcher)
-            .setOngoing(true)
+            .setContentTitle("Game Turbo: شاشة المراقبة العائمة")
+            .setContentText("مراقبة معدل الإطارات والحرارة في الوقت الفعلي")
+            .setSmallIcon(android.R.drawable.ic_menu_view)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
             .build()
-        startForeground(NOTIFICATION_ID, notification)
+
+        startForeground(1001, notification)
     }
 
     private fun initFloatingOverlay() {
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        val layoutParamsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        // FLAG_NOT_FOCUSABLE is critical so PUBG remains the foreground focused application
+        val savedX = prefsManager.overlayPosX.value
+        val savedY = prefsManager.overlayPosY.value
+
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutParamsType,
+            layoutType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = prefsManager.overlayPosX.value.coerceAtLeast(30)
-            y = prefsManager.overlayPosY.value.coerceAtLeast(80)
+            x = savedX
+            y = savedY
         }
 
-        val density = resources.displayMetrics.density
-        fun dp(value: Float) = (value * density).toInt()
-
-        // Root container with sleek semi-transparent Apple glass background
         val rootLayout = FrameLayout(this).apply {
             setPadding(0, 0, 0, 0)
         }
@@ -164,13 +177,11 @@ class FloatingMonitorService : Service() {
             elevation = dp(6f).toFloat()
         }
 
-        // Main content row containing: FPS [value] | 🌡 [temp] | [× button]
         val contentRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        // 1. FPS display text
         tvFps = TextView(this).apply {
             text = "FPS —"
             setTextColor(0xFF30D158.toInt())
@@ -179,7 +190,6 @@ class FloatingMonitorService : Service() {
             setPadding(0, 0, dp(8f), 0)
         }
 
-        // Vertical divider
         val divider = View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(1f), dp(14f)).apply {
                 setMargins(0, 0, dp(8f), 0)
@@ -187,7 +197,6 @@ class FloatingMonitorService : Service() {
             setBackgroundColor(0x3394A3B8.toInt())
         }
 
-        // 2. Temperature display text
         tvTemp = TextView(this).apply {
             text = "🌡 —°C"
             setTextColor(0xFF30D158.toInt())
@@ -196,7 +205,6 @@ class FloatingMonitorService : Service() {
             setPadding(0, 0, dp(8f), 0)
         }
 
-        // 3. Small close button (×)
         val tvClose = TextView(this).apply {
             text = "×"
             setTextColor(0xFF94A3B8.toInt())
@@ -216,7 +224,6 @@ class FloatingMonitorService : Service() {
         metricsContainer = contentRow
         cardLayout.addView(contentRow)
 
-        // 4. Shizuku / Error warning banner (hidden by default)
         tvStatusWarning = TextView(this).apply {
             text = "يجب تفعيل Shizuku للحصول على بيانات الأداء الحقيقية"
             setTextColor(0xFFFF9F0A.toInt())
@@ -228,7 +235,6 @@ class FloatingMonitorService : Service() {
         }
         cardLayout.addView(tvStatusWarning)
 
-        // Draggable touch listener with smooth position persistence
         rootLayout.setOnTouchListener { view, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -258,140 +264,122 @@ class FloatingMonitorService : Service() {
     }
 
     /**
-     * Starts continuous sampling loop running once every 1000ms.
+     * Starts continuous sampling loop running once every 2000ms (Fix A2).
      */
     private fun startPeriodicSampling() {
         samplingJob?.cancel()
         samplingJob = serviceScope.launch {
-            // Enable SurfaceFlinger TimeStats
-            SurfaceFlingerFpsEngine.enableTimeStats()
-
             while (isActive) {
-                if (isSampling.compareAndSet(false, true)) {
+                if (isScreenOn && isSampling.compareAndSet(false, true)) {
                     try {
                         val metrics = sampleLiveMetrics()
                         updateUi(metrics)
                         _liveMetrics.value = metrics
                     } catch (e: Throwable) {
-                        Log.e(TAG, "Error in sample loop: ${e.message}")
+                        Log.w(TAG, "Error in overlay sampling loop: ${e.message}")
                     } finally {
                         isSampling.set(false)
                     }
                 }
-                delay(1000)
+                delay(2000) // 2-second interval (Fix A2)
             }
         }
     }
 
-    /**
-     * Executes real hardware measurements in background.
-     */
     private suspend fun sampleLiveMetrics(): RealMonitorMetrics = withContext(Dispatchers.IO) {
         val shizukuReady = AdbCommandRunner.isAvailable()
+
+        // 1. Thermal sample with sensor priority (Skin -> CPU -> Battery)
+        val thermal = HardwareThermalSampler.sampleTemperature(applicationContext)
 
         if (!shizukuReady) {
             return@withContext RealMonitorMetrics(
                 fps = null,
-                tempCelsius = HardwareThermalSampler.sampleTemperature(applicationContext)?.temperatureCelsius,
+                thermalSample = thermal,
                 isShizukuReady = false,
                 errorMessage = "يجب تفعيل Shizuku للحصول على بيانات الأداء الحقيقية"
             )
         }
 
-        // 1. Detect foreground application package
-        val fgPackage = SurfaceFlingerFpsEngine.detectForegroundPackage()
+        // 2. Sample Game FPS via unified SurfaceFlinger engine
         val configuredGame = prefsManager.selectedGamePkg.value
-        val targetGame = SurfaceFlingerFpsEngine.resolveTargetGame(configuredGame, fgPackage)
-
-        // 2. Sample Game FPS via SurfaceFlinger TimeStats / Latency
-        val measuredFps = SurfaceFlingerFpsEngine.sampleFps(targetGame)
-        if (measuredFps != null) {
-            lastValidFps = measuredFps
-        }
-
-        // 3. Sample Hardware Temperature (Thermal service or battery)
-        val thermalSample = HardwareThermalSampler.sampleTemperature(applicationContext)
-        val measuredTemp = thermalSample?.temperatureCelsius
-        if (measuredTemp != null) {
-            lastValidTemp = measuredTemp
-        }
+        val measuredFps = SurfaceFlingerFpsEngine.sampleFps(applicationContext, configuredGame)
 
         RealMonitorMetrics(
-            fps = measuredFps ?: lastValidFps,
-            tempCelsius = measuredTemp ?: lastValidTemp,
+            fps = measuredFps,
+            thermalSample = thermal,
             isShizukuReady = true,
             errorMessage = null,
-            isUpdating = measuredFps == null && lastValidFps != null
+            isUpdating = false
         )
     }
 
-    /**
-     * Updates the compact floating overlay UI with strict color rules:
-     * - FPS: Green >= 55, Yellow 30-54, Red < 30
-     * - Temp: Green < 38°C, Yellow 38-42°C, Red > 42°C
-     */
     private fun updateUi(metrics: RealMonitorMetrics) {
         if (!metrics.isShizukuReady) {
             tvStatusWarning?.text = "يجب تفعيل Shizuku للحصول على بيانات الأداء الحقيقية"
             tvStatusWarning?.visibility = View.VISIBLE
-            tvFps?.text = "FPS: يحتاج صلاحية"
-            tvFps?.setTextColor(0xFF38BDF8.toInt()) // Blue warning
+            tvFps?.text = "FPS —"
+            tvFps?.setTextColor(0xFF38BDF8.toInt())
         } else {
             tvStatusWarning?.visibility = View.GONE
 
-            // FPS Formatting & Colors
             val fps = metrics.fps
             if (fps != null) {
-                val updateDot = if (metrics.isUpdating) "● " else ""
-                tvFps?.text = "FPS $updateDot$fps"
+                tvFps?.text = "FPS $fps"
                 when {
                     fps >= 55 -> tvFps?.setTextColor(0xFF30D158.toInt()) // Green
                     fps >= 30 -> tvFps?.setTextColor(0xFFFFD60A.toInt()) // Yellow
                     else -> tvFps?.setTextColor(0xFFFF453A.toInt())       // Red
                 }
             } else {
-                tvFps?.text = "FPS: غير متاح"
-                tvFps?.setTextColor(0xFF94A3B8.toInt()) // Slate
+                tvFps?.text = "FPS —"
+                tvFps?.setTextColor(0xFF94A3B8.toInt())
             }
         }
 
-        // Temperature Formatting & Colors
-        val temp = metrics.tempCelsius
-        if (temp != null) {
-            tvTemp?.text = "🌡 ${temp.toInt()}°C"
+        // Thermal Formatting with explicit sensor name (Fix A14)
+        val thermal = metrics.thermalSample
+        if (thermal != null) {
+            val tempC = thermal.temperatureCelsius.toInt()
+            val label = thermal.sensorName
+            tvTemp?.text = "🌡 $label $tempC°C"
             when {
-                temp < 38.0 -> tvTemp?.setTextColor(0xFF30D158.toInt())  // Green (< 38°C)
-                temp <= 42.0 -> tvTemp?.setTextColor(0xFFFFD60A.toInt()) // Yellow (38-42°C)
-                else -> tvTemp?.setTextColor(0xFFFF453A.toInt())         // Red (> 42°C)
+                tempC < 38 -> tvTemp?.setTextColor(0xFF30D158.toInt()) // Green
+                tempC <= 42 -> tvTemp?.setTextColor(0xFFFFD60A.toInt()) // Yellow
+                else -> tvTemp?.setTextColor(0xFFFF453A.toInt())        // Red
             }
         } else {
-            tvTemp?.text = "🌡 غير متاحة"
+            tvTemp?.text = "🌡 —°C"
             tvTemp?.setTextColor(0xFF94A3B8.toInt())
         }
+    }
+
+    private fun dp(value: Float): Int {
+        return (value * resources.displayMetrics.density).toInt()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         samplingJob?.cancel()
-        serviceScope.launch(Dispatchers.IO) {
-            SurfaceFlingerFpsEngine.disableTimeStats()
+        serviceScope.launch {
+            SurfaceFlingerFpsEngine.resetTimeStats()
         }
         serviceScope.cancel()
 
-        if (overlayView != null) {
-            try {
-                windowManager?.removeView(overlayView)
-            } catch (e: Throwable) {
-                Log.e(TAG, "Error removing overlayView: ${e.message}")
-            }
-            overlayView = null
+        screenReceiver?.let {
+            try { unregisterReceiver(it) } catch (_: Throwable) {}
         }
+        screenReceiver = null
+
+        overlayView?.let {
+            try { windowManager?.removeView(it) } catch (_: Throwable) {}
+        }
+        overlayView = null
         _isOverlayRunning.value = false
     }
 
     companion object {
         private const val TAG = "FloatingMonitorService"
-        private const val NOTIFICATION_ID = 8801
 
         private val _isOverlayRunning = MutableStateFlow(false)
         val isOverlayRunning: StateFlow<Boolean> = _isOverlayRunning.asStateFlow()
@@ -400,10 +388,6 @@ class FloatingMonitorService : Service() {
         val liveMetrics: StateFlow<RealMonitorMetrics> = _liveMetrics.asStateFlow()
 
         fun start(context: Context) {
-            if (!Settings.canDrawOverlays(context)) {
-                PermissionManager.openOverlaySettings(context)
-                return
-            }
             val intent = Intent(context, FloatingMonitorService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -415,7 +399,6 @@ class FloatingMonitorService : Service() {
         fun stop(context: Context) {
             val intent = Intent(context, FloatingMonitorService::class.java)
             context.stopService(intent)
-            _isOverlayRunning.value = false
         }
     }
 }

@@ -109,7 +109,7 @@ class FeatureVerificationEngine(
             val readValue = AdbCommandRunner.run(cmd.readCurrentCommand(targetGamePkg))?.trim()
             val expected = cmd.defaultTargetValue
 
-            val isActive = if (readValue != null) cmd.verifyPredicate(readValue, expected) else false
+            val isActive = if (readValue != null) cmd.isInModifiedState(readValue, expected, targetGamePkg) else false
             val status = when {
                 readValue == null -> FeatureVerificationStatus.UNSUPPORTED
                 isActive -> FeatureVerificationStatus.VERIFIED_ACTIVE

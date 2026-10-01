@@ -352,7 +352,7 @@ fun FeatureDiagnosticCard(
         TestStatus.FAILED -> theme.danger
         TestStatus.UNSUPPORTED -> theme.warning
         TestStatus.PERMISSION_REQUIRED -> theme.accentBlue
-        TestStatus.NOT_TESTED -> theme.textTertiary
+        TestStatus.NOT_TESTED, TestStatus.NOT_TESTABLE_NOW -> theme.textTertiary
     }
 
     val statusBadgeText = if (isRtl) item.status.labelAr else item.status.labelEn

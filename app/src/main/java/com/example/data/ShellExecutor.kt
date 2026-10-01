@@ -1,18 +1,16 @@
 package com.example.data
 
+import android.content.Context
 import android.content.pm.PackageManager
-import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.PrintWriter
-import java.io.StringWriter
 import java.lang.reflect.Method
+import java.util.concurrent.TimeUnit
 
 enum class FailureReason {
     SHIZUKU_NOT_RUNNING,
@@ -21,6 +19,13 @@ enum class FailureReason {
     NON_ZERO_EXIT,
     EXCEPTION,
     EMPTY_COMMAND
+}
+
+enum class CommandSource {
+    USER_ACTION,
+    SESSION,
+    REPORT,
+    TELEMETRY
 }
 
 sealed class SettingValue {
@@ -38,11 +43,17 @@ data class ExecResult(
     val durationMs: Long,
     val mechanism: String,
     val failureReason: FailureReason? = null,
-    val exceptionInfo: String? = null
+    val exceptionInfo: String? = null,
+    val source: CommandSource = CommandSource.USER_ACTION
 )
 
 interface ShellExecutor {
-    suspend fun runDetailed(command: String, timeoutMs: Long = 8000L): ExecResult
+    suspend fun runDetailed(
+        command: String,
+        timeoutMs: Long = 8000L,
+        source: CommandSource = CommandSource.USER_ACTION
+    ): ExecResult
+
     fun isAvailable(): Boolean
     fun getMechanismName(): String
 }
@@ -51,7 +62,7 @@ interface ShellExecutor {
  * Privileged Shell Executor using Shizuku Binder API.
  * Uses getDeclaredMethod("newProcess", ...) with isAccessible = true.
  * Concurrently drains stdout & stderr via coroutines to prevent buffer deadlocks.
- * Enforces strict 8000ms timeout and records execution time and full stack traces on exceptions.
+ * Enforces strict timeout with proc.destroyForcibly() to terminate hung processes (Fix A13).
  */
 class ShizukuShellExecutor : ShellExecutor {
     private val TAG = "ShizukuShellExecutor"
@@ -62,12 +73,9 @@ class ShizukuShellExecutor : ShellExecutor {
     override fun isAvailable(): Boolean {
         return try {
             if (!Shizuku.pingBinder()) {
-                Log.w(TAG, "Shizuku binder is not alive")
                 return false
             }
-            val granted = Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-            if (!granted) Log.w(TAG, "Shizuku permission not granted")
-            granted
+            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
         } catch (e: Throwable) {
             Log.e(TAG, "Shizuku availability check failed: ${e.javaClass.simpleName} - ${e.message}")
             false
@@ -97,7 +105,11 @@ class ShizukuShellExecutor : ShellExecutor {
         return method
     }
 
-    override suspend fun runDetailed(command: String, timeoutMs: Long): ExecResult = withContext(Dispatchers.IO) {
+    override suspend fun runDetailed(
+        command: String,
+        timeoutMs: Long,
+        source: CommandSource
+    ): ExecResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         val trimmed = command.trim()
 
@@ -110,7 +122,8 @@ class ShizukuShellExecutor : ShellExecutor {
                 stderr = "Empty command supplied",
                 durationMs = 0L,
                 mechanism = getMechanismName(),
-                failureReason = FailureReason.EMPTY_COMMAND
+                failureReason = FailureReason.EMPTY_COMMAND,
+                source = source
             )
         }
 
@@ -123,7 +136,8 @@ class ShizukuShellExecutor : ShellExecutor {
                 stderr = "Shizuku service is not running. Please start Shizuku first.",
                 durationMs = System.currentTimeMillis() - startTime,
                 mechanism = getMechanismName(),
-                failureReason = FailureReason.SHIZUKU_NOT_RUNNING
+                failureReason = FailureReason.SHIZUKU_NOT_RUNNING,
+                source = source
             )
         }
 
@@ -136,7 +150,8 @@ class ShizukuShellExecutor : ShellExecutor {
                 stderr = "Shizuku permission denied. Please grant permission in Shizuku app.",
                 durationMs = System.currentTimeMillis() - startTime,
                 mechanism = getMechanismName(),
-                failureReason = FailureReason.SHIZUKU_PERMISSION_DENIED
+                failureReason = FailureReason.SHIZUKU_PERMISSION_DENIED,
+                source = source
             )
         }
 
@@ -155,7 +170,7 @@ class ShizukuShellExecutor : ShellExecutor {
             val stdoutDeferred = async(Dispatchers.IO) {
                 try {
                     BufferedReader(InputStreamReader(proc.inputStream)).use { it.readText().trim() }
-                } catch (e: Throwable) {
+                } catch (_: Throwable) {
                     ""
                 }
             }
@@ -163,65 +178,54 @@ class ShizukuShellExecutor : ShellExecutor {
             val stderrDeferred = async(Dispatchers.IO) {
                 try {
                     BufferedReader(InputStreamReader(proc.errorStream)).use { it.readText().trim() }
-                } catch (e: Throwable) {
+                } catch (_: Throwable) {
                     ""
                 }
             }
 
-            val exitCode = withTimeoutOrNull(timeoutMs) {
-                proc.waitFor()
-            }
-
+            // Fix A13: Use process.waitFor with timeout and destroyForcibly() on timeout
+            val finishedInTime = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
             val durationMs = System.currentTimeMillis() - startTime
 
-            if (exitCode == null) {
-                Log.w(TAG, "Command execution timed out after ${timeoutMs}ms: $command")
-                try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        proc.destroyForcibly()
-                    } else {
-                        proc.destroy()
-                    }
-                } catch (_: Throwable) {}
+            if (!finishedInTime) {
+                proc.destroyForcibly()
                 stdoutDeferred.cancel()
                 stderrDeferred.cancel()
-
                 return@withContext ExecResult(
                     command = command,
                     success = false,
                     exitCode = -1,
                     stdout = "",
-                    stderr = "Command execution timed out after ${timeoutMs}ms",
+                    stderr = "Command execution timed out after ${timeoutMs}ms and process was forcibly terminated",
                     durationMs = durationMs,
                     mechanism = getMechanismName(),
-                    failureReason = FailureReason.TIMEOUT
+                    failureReason = FailureReason.TIMEOUT,
+                    source = source
                 )
             }
 
-            val stdout = stdoutDeferred.await()
-            val stderr = stderrDeferred.await()
-            val isSuccess = (exitCode == 0)
+            val exitCode = proc.exitValue()
+            val stdoutText = stdoutDeferred.await()
+            val stderrText = stderrDeferred.await()
+
+            val success = exitCode == 0
+            val failureReason = if (success) null else FailureReason.NON_ZERO_EXIT
 
             ExecResult(
                 command = command,
-                success = isSuccess,
+                success = success,
                 exitCode = exitCode,
-                stdout = stdout,
-                stderr = stderr,
+                stdout = stdoutText,
+                stderr = stderrText,
                 durationMs = durationMs,
                 mechanism = getMechanismName(),
-                failureReason = if (!isSuccess) FailureReason.NON_ZERO_EXIT else null
+                failureReason = failureReason,
+                source = source
             )
         } catch (e: Throwable) {
             val durationMs = System.currentTimeMillis() - startTime
-            val sw = StringWriter()
-            e.printStackTrace(PrintWriter(sw))
-            val fullStackTrace = sw.toString()
-            val errorSummary = "${e.javaClass.name}: ${e.message ?: "Unknown error"}"
-
-            Log.e(TAG, "Exception running command [$command]: $errorSummary", e)
             try {
-                process?.destroy()
+                process?.destroyForcibly()
             } catch (_: Throwable) {}
 
             ExecResult(
@@ -229,11 +233,12 @@ class ShizukuShellExecutor : ShellExecutor {
                 success = false,
                 exitCode = -1,
                 stdout = "",
-                stderr = errorSummary,
+                stderr = "Exception executing command: ${e.message}",
                 durationMs = durationMs,
                 mechanism = getMechanismName(),
                 failureReason = FailureReason.EXCEPTION,
-                exceptionInfo = fullStackTrace
+                exceptionInfo = e.stackTraceToString(),
+                source = source
             )
         }
     }

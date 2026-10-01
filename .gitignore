@@ -21,3 +21,6 @@ local.properties
 debug.keystore
 *.keystore
 *.jks
+keystore.properties
+*.base64
+debug.keystore.base64

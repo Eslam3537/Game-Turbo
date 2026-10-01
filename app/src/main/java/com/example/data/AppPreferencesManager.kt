@@ -2,16 +2,42 @@ package com.example.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Persistent Configuration & State Manager.
- * Preserves user settings across app process death and system restarts.
+ * Preserves user settings across app process death, reboots, and app version updates.
+ * Never wipes preferences on update.
  */
 class AppPreferencesManager(context: Context) {
-    private val prefs: SharedPreferences = context.getSharedPreferences("game_turbo_verified_prefs", Context.MODE_PRIVATE)
+    private val TAG = "AppPreferencesManager"
+
+    private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).apply {
+        // Seamless one-time data migration from legacy preferences if present
+        try {
+            val legacy = context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE)
+            if (legacy.all.isNotEmpty() && this.all.isEmpty()) {
+                val editor = edit()
+                for ((key, value) in legacy.all) {
+                    when (value) {
+                        is Boolean -> editor.putBoolean(key, value)
+                        is Int -> editor.putInt(key, value)
+                        is Long -> editor.putLong(key, value)
+                        is Float -> editor.putFloat(key, value)
+                        is String -> editor.putString(key, value)
+                        is Set<*> -> @Suppress("UNCHECKED_CAST") editor.putStringSet(key, value as Set<String>)
+                    }
+                }
+                editor.apply()
+                Log.i(TAG, "Migrated ${legacy.all.size} preferences from $LEGACY_PREFS_NAME to $PREFS_NAME")
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Legacy preferences migration notice: ${e.message}")
+        }
+    }
 
     // 1. User Preferences
     private val _themeMode = MutableStateFlow(prefs.getString(KEY_THEME, "dark") ?: "dark")
@@ -130,7 +156,26 @@ class AppPreferencesManager(context: Context) {
         _previousDndFilter.value = filter
     }
 
+    /**
+     * Checks if the app was just upgraded in-place from a previous version.
+     * Stores current versionCode and returns previous version code if an upgrade occurred.
+     */
+    fun checkAndRecordAppUpdate(currentVersionCode: Int): Int? {
+        val previousVersionCode = prefs.getInt(KEY_LAST_INSTALLED_VERSION_CODE, -1)
+        if (previousVersionCode != currentVersionCode) {
+            prefs.edit().putInt(KEY_LAST_INSTALLED_VERSION_CODE, currentVersionCode).apply()
+        }
+        return if (previousVersionCode != -1 && previousVersionCode < currentVersionCode) {
+            previousVersionCode
+        } else {
+            null
+        }
+    }
+
     companion object {
+        const val PREFS_NAME = "game_turbo_production_prefs"
+        private const val LEGACY_PREFS_NAME = "game_turbo_verified_prefs"
+
         private const val KEY_THEME = "pref_theme_mode"
         private const val KEY_LANGUAGE = "pref_language"
         private const val KEY_SELECTED_GAME = "pref_selected_game"
@@ -145,5 +190,6 @@ class AppPreferencesManager(context: Context) {
         private const val KEY_SESSION_ACTIVE = "state_session_active"
         private const val KEY_ACTIVE_SESSION_ID = "state_active_session_id"
         private const val KEY_PREV_DND_FILTER = "state_prev_dnd_filter"
+        private const val KEY_LAST_INSTALLED_VERSION_CODE = "pref_last_installed_version_code"
     }
 }

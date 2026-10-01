@@ -1,0 +1,365 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "2f16ea48dbd08c1dfb94d5b19a89ca22",
+    "entities": [
+      {
+        "tableName": "optimization_logs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `commandName` TEXT NOT NULL, `commandText` TEXT NOT NULL, `status` TEXT NOT NULL, `responseMsg` TEXT NOT NULL, `executionTime` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "commandName",
+            "columnName": "commandName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "commandText",
+            "columnName": "commandText",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "responseMsg",
+            "columnName": "responseMsg",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "executionTime",
+            "columnName": "executionTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "booster_games",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `packageName` TEXT NOT NULL, `isCustom` INTEGER NOT NULL, `perfProfile` TEXT NOT NULL, `addedTime` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "packageName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCustom",
+            "columnName": "isCustom",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "perfProfile",
+            "columnName": "perfProfile",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "addedTime",
+            "columnName": "addedTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "game_sessions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sessionId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `gamePackage` TEXT NOT NULL, `gameName` TEXT NOT NULL, `startTime` INTEGER NOT NULL, `endTime` INTEGER NOT NULL, `durationSeconds` INTEGER NOT NULL, `profileApplied` TEXT NOT NULL, `baselineRttMs` INTEGER, `baselineJitterMs` INTEGER, `baselineTempC` INTEGER, `avgRttMs` INTEGER, `maxRttMs` INTEGER, `avgJitterMs` INTEGER, `peakTempC` INTEGER, `avgFps` INTEGER, `frameSpikesCount` INTEGER NOT NULL, `rttSpikesCount` INTEGER NOT NULL, `thermalThrottlingDetected` INTEGER NOT NULL, `appliedOptimizationsCount` INTEGER NOT NULL, `verifiedOptimizationsCount` INTEGER NOT NULL, `failedOptimizationsCount` INTEGER NOT NULL, `rollbackSuccess` INTEGER NOT NULL, `summaryVerdict` TEXT NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "gamePackage",
+            "columnName": "gamePackage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "gameName",
+            "columnName": "gameName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startTime",
+            "columnName": "startTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endTime",
+            "columnName": "endTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationSeconds",
+            "columnName": "durationSeconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profileApplied",
+            "columnName": "profileApplied",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "baselineRttMs",
+            "columnName": "baselineRttMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "baselineJitterMs",
+            "columnName": "baselineJitterMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "baselineTempC",
+            "columnName": "baselineTempC",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "avgRttMs",
+            "columnName": "avgRttMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "maxRttMs",
+            "columnName": "maxRttMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "avgJitterMs",
+            "columnName": "avgJitterMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "peakTempC",
+            "columnName": "peakTempC",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "avgFps",
+            "columnName": "avgFps",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "frameSpikesCount",
+            "columnName": "frameSpikesCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rttSpikesCount",
+            "columnName": "rttSpikesCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thermalThrottlingDetected",
+            "columnName": "thermalThrottlingDetected",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "appliedOptimizationsCount",
+            "columnName": "appliedOptimizationsCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "verifiedOptimizationsCount",
+            "columnName": "verifiedOptimizationsCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failedOptimizationsCount",
+            "columnName": "failedOptimizationsCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rollbackSuccess",
+            "columnName": "rollbackSuccess",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "summaryVerdict",
+            "columnName": "summaryVerdict",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "sessionId"
+          ]
+        }
+      },
+      {
+        "tableName": "diagnostic_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`eventId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sessionId` INTEGER NOT NULL, `timestamp` INTEGER NOT NULL, `eventType` TEXT NOT NULL, `title` TEXT NOT NULL, `description` TEXT NOT NULL, `severity` TEXT NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventType",
+            "columnName": "eventType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "severity",
+            "columnName": "severity",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "eventId"
+          ]
+        }
+      },
+      {
+        "tableName": "system_snapshots",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`commandId` TEXT NOT NULL, `settingNamespace` TEXT NOT NULL, `settingKey` TEXT NOT NULL, `originalValue` TEXT NOT NULL, `isAbsentOriginally` INTEGER NOT NULL, `appliedValue` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `extraMetadata` TEXT NOT NULL, PRIMARY KEY(`commandId`))",
+        "fields": [
+          {
+            "fieldPath": "commandId",
+            "columnName": "commandId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "settingNamespace",
+            "columnName": "settingNamespace",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "settingKey",
+            "columnName": "settingKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalValue",
+            "columnName": "originalValue",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isAbsentOriginally",
+            "columnName": "isAbsentOriginally",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "appliedValue",
+            "columnName": "appliedValue",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "extraMetadata",
+            "columnName": "extraMetadata",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "commandId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '2f16ea48dbd08c1dfb94d5b19a89ca22')"
+    ]
+  }
+}

@@ -1,27 +1,24 @@
 package com.example.engine.performance
 
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.util.Log
 import com.example.data.AdbCommandRunner
+import com.example.data.CommandSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.regex.Pattern
 
 /**
- * SurfaceFlinger Real-Time Game FPS Measurement Engine.
- *
- * Implements:
- * 1. SurfaceFlinger TimeStats (Primary): Measures actual frames presented to display.
- * 2. SurfaceFlinger Latency Timestamps (Fallback): Measures vsync frame intervals.
- * 3. Foreground App Detection: Verifies PUBG or user's selected game is active.
- *
- * Strict Rule: NEVER fabricates or returns display refresh rate as game FPS.
- * Returns null ("غير متاح") when game is not rendered or data is unavailable.
+ * Unified SurfaceFlinger Real-Time Game FPS Engine (Fix A2, A14).
+ * Single source of truth for Home, Overlay HUD, and Sessions.
+ * Only runs SurfaceFlinger queries when target game is confirmed in the foreground.
+ * Implements 3-second staleness timeout (returns null/N/A after 3 seconds of missing frames).
  */
 object SurfaceFlingerFpsEngine {
     private const val TAG = "SurfaceFlingerFpsEngine"
+    private const val FOREGROUND_CHECK_TTL_MS = 5000L
+    private const val STALENESS_LIMIT_MS = 3000L
 
-    // Supported PUBG package IDs across global and regional editions
     val KNOWN_PUBG_PACKAGES = setOf(
         "com.tencent.ig",           // PUBG Mobile Global
         "com.pubg.imobile",         // BGMI (Battlegrounds Mobile India)
@@ -31,238 +28,147 @@ object SurfaceFlingerFpsEngine {
         "com.tencent.tmgp.pubgmhd"  // Game for Peace (China)
     )
 
-    private var isTimeStatsEnabled = false
-    private var lastTotalFrames = -1L
-    private var lastSampleTimeMs = 0L
+    private var lastForegroundCheckTime = 0L
+    private var lastDetectedForegroundPackage: String? = null
+
+    private var lastValidFps: Int? = null
+    private var lastValidFpsTime = 0L
 
     /**
-     * Initializes SurfaceFlinger TimeStats measurement session.
+     * Cheap check for active foreground package (cached for 5 seconds).
      */
-    suspend fun enableTimeStats(): Boolean = withContext(Dispatchers.IO) {
-        if (!AdbCommandRunner.isAvailable()) return@withContext false
+    suspend fun getForegroundPackage(context: Context): String? = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (lastDetectedForegroundPackage != null && (now - lastForegroundCheckTime) < FOREGROUND_CHECK_TTL_MS) {
+            return@withContext lastDetectedForegroundPackage
+        }
+
+        var detectedPkg: String? = null
+
+        // 1. Try UsageStatsManager
         try {
-            val res = AdbCommandRunner.runDetailed("dumpsys SurfaceFlinger --timestats -clear -enable")
-            isTimeStatsEnabled = res.success
-            lastTotalFrames = -1L
-            lastSampleTimeMs = System.currentTimeMillis()
-            isTimeStatsEnabled
-        } catch (e: Throwable) {
-            Log.e(TAG, "enableTimeStats failed: ${e.message}")
-            false
-        }
-    }
-
-    /**
-     * Disables SurfaceFlinger TimeStats upon monitor termination to save CPU cycles.
-     */
-    suspend fun disableTimeStats() = withContext(Dispatchers.IO) {
-        if (!AdbCommandRunner.isAvailable()) return@withContext
-        try {
-            AdbCommandRunner.runDetailed("dumpsys SurfaceFlinger --timestats -disable")
-            isTimeStatsEnabled = false
-        } catch (e: Throwable) {
-            Log.e(TAG, "disableTimeStats failed: ${e.message}")
-        }
-    }
-
-    /**
-     * Detects the package name currently in the foreground via Shizuku shell.
-     */
-    suspend fun detectForegroundPackage(): String? = withContext(Dispatchers.IO) {
-        if (!AdbCommandRunner.isAvailable()) return@withContext null
-        try {
-            // Fast query: window focus
-            val windowDump = AdbCommandRunner.run("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")
-            if (!windowDump.isNullOrBlank()) {
-                val pkgMatcher = Pattern.compile("([a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)+)").matcher(windowDump)
-                while (pkgMatcher.find()) {
-                    val pkg = pkgMatcher.group(1)
-                    if (pkg != null && !pkg.startsWith("android") && !pkg.contains("systemui") && !pkg.contains("launcher")) {
-                        return@withContext pkg
-                    }
-                }
+            val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+            val stats = usageStatsManager?.queryUsageStats(
+                UsageStatsManager.INTERVAL_DAILY,
+                now - 10000,
+                now
+            )
+            val mostRecent = stats?.maxByOrNull { it.lastTimeUsed }
+            if (mostRecent != null && (now - mostRecent.lastTimeUsed) < 15000) {
+                detectedPkg = mostRecent.packageName
             }
+        } catch (_: Throwable) {}
 
-            // Fallback query: top resumed activity
-            val actDump = AdbCommandRunner.run("dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity'")
-            if (!actDump.isNullOrBlank()) {
-                val actMatcher = Pattern.compile("([a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)+)").matcher(actDump)
-                while (actMatcher.find()) {
-                    val pkg = actMatcher.group(1)
-                    if (pkg != null && !pkg.startsWith("android") && !pkg.contains("systemui") && !pkg.contains("launcher")) {
-                        return@withContext pkg
-                    }
+        // 2. Fallback to single dumpsys activity top-resumed if available
+        if (detectedPkg == null && AdbCommandRunner.isAvailable()) {
+            try {
+                val out = AdbCommandRunner.run("dumpsys activity top-resumed", source = CommandSource.TELEMETRY)
+                val line = out?.lines()?.firstOrNull { it.contains("top-resumed", ignoreCase = true) || it.contains("mResumedActivity", ignoreCase = true) }
+                if (line != null) {
+                    val match = Regex("""([a-zA-Z0-9_.]+/([a-zA-Z0-9_.]+))""").find(line)
+                    detectedPkg = match?.groupValues?.getOrNull(1)?.substringBefore('/')
                 }
-            }
-            null
-        } catch (e: Throwable) {
-            Log.d(TAG, "detectForegroundPackage error: ${e.message}")
-            null
+            } catch (_: Throwable) {}
         }
+
+        lastDetectedForegroundPackage = detectedPkg
+        lastForegroundCheckTime = now
+        detectedPkg
     }
 
     /**
-     * Resolves the target game package (PUBG or user-configured game).
+     * Measures game FPS via SurfaceFlinger latency timestamps.
+     * Returns null if game is not active in the foreground, without running expensive shell queries (Fix A2).
      */
-    fun resolveTargetGame(configuredGamePkg: String, foregroundPkg: String?): String {
-        // If foreground package is an active PUBG edition, prioritize it
-        if (foregroundPkg != null && KNOWN_PUBG_PACKAGES.contains(foregroundPkg)) {
-            return foregroundPkg
-        }
-        // If configured game is active in foreground, use it
-        if (configuredGamePkg.isNotBlank() && foregroundPkg == configuredGamePkg) {
-            return configuredGamePkg
-        }
-        // If configured game is set, use it as fallback target
-        if (configuredGamePkg.isNotBlank()) {
-            return configuredGamePkg
-        }
-        // Default target to PUBG Mobile Global
-        return "com.tencent.ig"
-    }
-
-    /**
-     * Samples real FPS for the target game.
-     * Tries TimeStats first; falls back to SurfaceFlinger latency if needed.
-     */
-    suspend fun sampleFps(targetPackage: String): Int? = withContext(Dispatchers.IO) {
-        if (!AdbCommandRunner.isAvailable()) return@withContext null
-
-        // Strategy 1: TimeStats
-        val timeStatsFps = sampleViaTimeStats(targetPackage)
-        if (timeStatsFps != null && timeStatsFps in 10..144) {
-            return@withContext timeStatsFps
+    suspend fun sampleFps(context: Context, targetGamePackage: String): Int? = withContext(Dispatchers.IO) {
+        if (!AdbCommandRunner.isAvailable()) {
+            return@withContext null
         }
 
-        // Strategy 2: SurfaceFlinger Frame Latency Fallback
-        val latencyFps = sampleViaFrameLatency(targetPackage)
-        if (latencyFps != null && latencyFps in 10..144) {
-            return@withContext latencyFps
-        }
+        // Fix A2: Confirm target game is in foreground before spawning FPS shell commands
+        val fg = getForegroundPackage(context)
+        val isTargetActive = fg == targetGamePackage || (fg != null && KNOWN_PUBG_PACKAGES.contains(fg))
 
-        // Return null if data is unconfirmed — NEVER return screen refresh rate
-        null
-    }
-
-    /**
-     * Measures FPS using SurfaceFlinger --timestats
-     */
-    private suspend fun sampleViaTimeStats(targetPackage: String): Int? {
-        try {
-            if (!isTimeStatsEnabled) {
-                enableTimeStats()
-            }
-
-            val dumpOutput = AdbCommandRunner.run("dumpsys SurfaceFlinger --timestats -dump")
-                ?: return null
-
-            val lines = dumpOutput.lines()
-            var inTargetLayer = false
-            var totalFrames: Long? = null
-            var averageFps: Double? = null
-
-            for (rawLine in lines) {
-                val line = rawLine.trim()
-                if (line.startsWith("Layer name:") || line.startsWith("layerName =") || line.contains("Layer:")) {
-                    inTargetLayer = line.contains(targetPackage, ignoreCase = true)
-                }
-
-                if (inTargetLayer) {
-                    // Format 1: totalFrames = 120 or totalFrames: 120
-                    if (line.contains("totalFrames", ignoreCase = true) || line.contains("totalPresentFrames", ignoreCase = true)) {
-                        val num = line.filter { it.isDigit() }.toLongOrNull()
-                        if (num != null) totalFrames = num
-                    }
-                    // Format 2: averageFPS = 59.8 or averageFPS: 60
-                    if (line.contains("averageFPS", ignoreCase = true) || line.contains("frameRate", ignoreCase = true)) {
-                        val parts = line.split("=", ":")
-                        if (parts.size >= 2) {
-                            val parsed = parts[1].trim().toDoubleOrNull()
-                            if (parsed != null && parsed > 5.0) averageFps = parsed
-                        }
-                    }
-                }
-            }
-
+        if (!isTargetActive) {
+            // Check staleness window
             val now = System.currentTimeMillis()
-            val elapsedSec = (now - lastSampleTimeMs) / 1000.0
-
-            // If averageFps was directly reported for this layer
-            if (averageFps != null && averageFps > 5.0) {
-                AdbCommandRunner.run("dumpsys SurfaceFlinger --timestats -clear")
-                lastSampleTimeMs = now
-                return averageFps.toInt()
+            return@withContext if (lastValidFps != null && (now - lastValidFpsTime) < STALENESS_LIMIT_MS) {
+                lastValidFps
+            } else {
+                lastValidFps = null
+                null
             }
-
-            // Calculate delta frames over the elapsed window
-            if (totalFrames != null && lastTotalFrames >= 0 && totalFrames >= lastTotalFrames && elapsedSec >= 0.7) {
-                val deltaFrames = totalFrames - lastTotalFrames
-                val calculatedFps = (deltaFrames / elapsedSec).toInt()
-                lastTotalFrames = totalFrames
-                lastSampleTimeMs = now
-
-                // Clear sample after successful read
-                AdbCommandRunner.run("dumpsys SurfaceFlinger --timestats -clear")
-                lastTotalFrames = 0L
-
-                if (calculatedFps in 10..144) {
-                    return calculatedFps
-                }
-            } else if (totalFrames != null) {
-                lastTotalFrames = totalFrames
-                lastSampleTimeMs = now
-            }
-        } catch (e: Throwable) {
-            Log.d(TAG, "sampleViaTimeStats error: ${e.message}")
         }
-        return null
-    }
 
-    /**
-     * Fallback: Measures FPS using SurfaceFlinger --latency <layer>
-     */
-    private suspend fun sampleViaFrameLatency(targetPackage: String): Int? {
+        val effectivePkg = if (KNOWN_PUBG_PACKAGES.contains(fg)) fg!! else targetGamePackage
+
         try {
-            // Find game surface layer
-            val listOutput = AdbCommandRunner.run("dumpsys SurfaceFlinger --list") ?: return null
-            val layers = listOutput.lines().map { it.trim() }
+            // 1. Locate SurfaceFlinger active layer for this package
+            val listOutput = AdbCommandRunner.run("dumpsys SurfaceFlinger --list", source = CommandSource.TELEMETRY)
+                ?: return@withContext checkStaleFps()
+            val lines = listOutput.lines().map { it.trim() }
 
-            val gameLayer = layers.firstOrNull { it.contains(targetPackage, ignoreCase = true) && it.contains("SurfaceView", ignoreCase = true) }
-                ?: layers.firstOrNull { it.contains(targetPackage, ignoreCase = true) }
-                ?: return null
+            val gameLayer = lines.firstOrNull { it.contains(effectivePkg) && it.contains("SurfaceView") }
+                ?: lines.firstOrNull { it.contains(effectivePkg) }
 
-            val latencyOutput = AdbCommandRunner.run("dumpsys SurfaceFlinger --latency \"$gameLayer\"")
-                ?: return null
+            if (gameLayer.isNullOrBlank()) {
+                return@withContext checkStaleFps()
+            }
+
+            // 2. Fetch SurfaceFlinger frame timestamps for this layer
+            val latencyOutput = AdbCommandRunner.run("dumpsys SurfaceFlinger --latency \"$gameLayer\"", source = CommandSource.TELEMETRY)
+                ?: return@withContext checkStaleFps()
 
             val latencyLines = latencyOutput.lines().map { it.trim() }.filter { it.isNotBlank() }
-            if (latencyLines.size < 6) return null
+            if (latencyLines.size < 5) return@withContext checkStaleFps()
 
-            // Extract presentation/vsync timestamps (column 1 or 2)
             val timestamps = mutableListOf<Long>()
             for (i in 1 until latencyLines.size) {
                 val parts = latencyLines[i].split("\\s+".toRegex())
                 if (parts.size >= 3) {
-                    val ts = parts[1].toLongOrNull() ?: parts[2].toLongOrNull()
-                    if (ts != null && ts > 0L && ts < 9223372036854775800L) {
-                        timestamps.add(ts)
+                    val readyTime = parts[1].toLongOrNull() ?: parts[2].toLongOrNull()
+                    if (readyTime != null && readyTime > 0L && readyTime < 9223372036854775800L) {
+                        timestamps.add(readyTime)
                     }
                 }
             }
 
-            if (timestamps.size < 6) return null
+            if (timestamps.size < 6) return@withContext checkStaleFps()
 
-            // Window of the last 30 frames
             val recent = timestamps.takeLast(30)
             val deltaNanos = recent.last() - recent.first()
-            if (deltaNanos <= 0L) return null
+            if (deltaNanos <= 0L) return@withContext checkStaleFps()
 
-            val fps = ((recent.size - 1).toDouble() * 1_000_000_000.0 / deltaNanos.toDouble()).toInt()
-            if (fps in 10..144) {
-                return fps
+            val measuredFps = ((recent.size - 1).toDouble() * 1_000_000_000.0 / deltaNanos.toDouble()).toInt()
+            if (measuredFps in 10..144) {
+                lastValidFps = measuredFps
+                lastValidFpsTime = System.currentTimeMillis()
+                return@withContext measuredFps
             }
+
+            checkStaleFps()
         } catch (e: Throwable) {
-            Log.d(TAG, "sampleViaFrameLatency error: ${e.message}")
+            Log.w(TAG, "sampleFps notice: ${e.message}")
+            checkStaleFps()
         }
-        return null
+    }
+
+    private fun checkStaleFps(): Int? {
+        val now = System.currentTimeMillis()
+        return if (lastValidFps != null && (now - lastValidFpsTime) < STALENESS_LIMIT_MS) {
+            lastValidFps
+        } else {
+            lastValidFps = null
+            null
+        }
+    }
+
+    suspend fun resetTimeStats() = withContext(Dispatchers.IO) {
+        if (!AdbCommandRunner.isAvailable()) return@withContext
+        try {
+            AdbCommandRunner.runDetailed("dumpsys SurfaceFlinger --timestats -disable", source = CommandSource.TELEMETRY)
+        } catch (_: Throwable) {}
+        lastValidFps = null
+        lastValidFpsTime = 0L
     }
 }

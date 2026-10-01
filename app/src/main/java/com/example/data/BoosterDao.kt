@@ -15,6 +15,9 @@ interface BoosterDao {
     @Query("DELETE FROM optimization_logs")
     suspend fun clearAllLogs()
 
+    @Query("DELETE FROM optimization_logs WHERE id NOT IN (SELECT id FROM optimization_logs ORDER BY executionTime DESC LIMIT 500)")
+    suspend fun trimOldLogs()
+
     // Added Games
     @Query("SELECT * FROM booster_games ORDER BY addedTime DESC")
     fun getAllGames(): Flow<List<AddedGame>>

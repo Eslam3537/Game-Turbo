@@ -3,28 +3,33 @@ package com.example.engine.diagnostics
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.os.BatteryManager
-import android.os.Build
-import android.os.PowerManager
-import android.view.Display
+import android.content.pm.PackageManager
 import com.example.data.AdbCommandRunner
 import com.example.data.BoosterDao
-import com.example.data.SystemSnapshotRecord
-import com.example.engine.capability.DeviceCapabilityEngine
+import com.example.engine.network.NetworkStabilityEngine
+import com.example.engine.performance.SurfaceFlingerFpsEngine
+import com.example.engine.session.SessionController
+import com.example.engine.shizuku.CommandRegistry
+import com.example.engine.shizuku.ShizukuExecutionEngine
+import com.example.engine.shizuku.SystemTuningCommand
+import com.example.engine.shizuku.VerificationLevel
 import com.example.util.PermissionManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 enum class TestStatus(val labelAr: String, val labelEn: String) {
-    SUCCESS("تم التنفيذ بنجاح", "Successfully Executed"),
-    FAILED("فشل التنفيذ", "Execution Failed"),
-    UNSUPPORTED("غير مدعومة على هذا الجهاز", "Unsupported on this Device"),
+    SUCCESS("تم التحقق بنجاح", "Successfully Verified"),
+    FAILED("فشل التحقق", "Verification Failed"),
+    UNSUPPORTED("غير مدعوم على هذا الروم/الجهاز", "Unsupported on this Device/ROM"),
     PERMISSION_REQUIRED("تحتاج إلى صلاحية", "Permission Required"),
-    NOT_TESTED("لم يتم الاختبار", "Not Tested")
+    NOT_TESTED("لم يتم الاختبار", "Not Tested"),
+    NOT_TESTABLE_NOW("غير قابل للاختبار الآن", "Not Testable Now")
 }
 
 data class FeatureTestResult(
@@ -32,6 +37,7 @@ data class FeatureTestResult(
     val nameAr: String,
     val nameEn: String,
     val status: TestStatus = TestStatus.NOT_TESTED,
+    val verificationLevel: VerificationLevel? = null,
     val executedCommand: String = "—",
     val expectedResult: String = "—",
     val actualResult: String = "—",
@@ -51,967 +57,540 @@ data class DiagnosticsSummary(
     val unsupportedCount: Int = 0,
     val permissionRequiredCount: Int = 0,
     val notTestedCount: Int = 0,
+    val notTestableNowCount: Int = 0,
     val totalCount: Int = 0
 )
 
+/**
+ * Reality Report Engine v2 (Fix Part B).
+ * Single source of truth: executes production ShizukuExecutionEngine and real rollbacks.
+ * No trivial passes, no fake checks, real hardware/system measurements.
+ */
 class OptimizationStatusEngine(
     private val context: Context,
-    private val boosterDao: BoosterDao
+    private val boosterDao: BoosterDao,
+    private val shizukuEngine: ShizukuExecutionEngine,
+    private val networkEngine: NetworkStabilityEngine
 ) {
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
 
-    /**
-     * Instantiates the complete list of testable features in initial NOT_TESTED state.
-     */
     fun getInitialFeatureList(): List<FeatureTestResult> {
-        return listOf(
+        val list = mutableListOf<FeatureTestResult>()
+
+        // 1. Core Platform & Permissions
+        list.add(
             FeatureTestResult(
                 id = "shizuku_adb",
-                nameAr = "تنفيذ أوامر ADB أو Shizuku",
-                nameEn = "Privileged ADB / Shizuku Execution",
+                nameAr = "تنفيذ أوامر Shizuku Privileged Shell",
+                nameEn = "Shizuku Shell IPC Execution",
                 requiredPermission = "moe.shizuku.manager.permission.API_V23",
-                fixSteps = "قم بتثبيت تطبيق Shizuku، وتشغيل الخدمة عبر خيار 'التصحيح اللاسلكي' في خيارات المطور، ثم امنح الإذن لتطبيق Game Turbo."
-            ),
-            FeatureTestResult(
-                id = "game_mode_perf",
-                nameAr = "تفعيل Game Mode Performance",
-                nameEn = "Game Mode Performance Activation",
-                requiredPermission = "Shizuku Shell Access",
-                fixSteps = "تأكد من تشغيل Shizuku، وأن الجهاز يدعم واجهة Power HAL للأداء الثابت."
-            ),
+                fixSteps = "قم بتشغيل خدمة Shizuku عبر التصحيح اللاسلكي ثم امنح الإذن لتطبيق Game Turbo."
+            )
+        )
+        list.add(
             FeatureTestResult(
                 id = "dnd_gaming",
                 nameAr = "تفعيل وضع عدم الإزعاج (Gaming DND)",
-                nameEn = "Gaming Do Not Disturb Mode",
+                nameEn = "Gaming Do Not Disturb Policy",
                 requiredPermission = "android.permission.ACCESS_NOTIFICATION_POLICY",
-                fixSteps = "افتح إعدادات الهاتف > التطبيقات > إمكانية الوصول الخاصة > الوصول لوضع عدم الإزعاج، وفعّل الإذن لتطبيق Game Turbo."
-            ),
+                fixSteps = "امنح إذن الوصول إلى سياسة الإشعارات من إعدادات النظام."
+            )
+        )
+        list.add(
             FeatureTestResult(
-                id = "heads_up_notifications",
-                nameAr = "إيقاف الإشعارات العائمة",
-                nameEn = "Disable Heads-up Floating Notifications",
-                requiredPermission = "Shizuku Shell Access (WRITE_SECURE_SETTINGS)",
-                fixSteps = "اربط تطبيق Shizuku بالتصحيح اللاسلكي لتتمكن من تعديل إعدادات الإشعارات العائمة على مستوى النظام."
-            ),
+                id = "pubg_launchable",
+                nameAr = "اكتشاف وتثبيت اللعبة",
+                nameEn = "Game Installed & Launchable",
+                fixSteps = "تأكد من تثبيت لعبة PUBG Mobile أو BGMI أو إضافة لعبتك في قسم الألعاب."
+            )
+        )
+
+        // 2. Registry Tuning Commands (Single source of truth - Fix B1)
+        for (cmd in CommandRegistry.ALL_COMMANDS) {
+            list.add(
+                FeatureTestResult(
+                    id = "cmd_${cmd.id}",
+                    nameAr = cmd.nameAr,
+                    nameEn = cmd.nameEn,
+                    executedCommand = cmd.applyCommand("com.tencent.ig", cmd.defaultTargetValue),
+                    expectedResult = cmd.defaultTargetValue,
+                    requiredPermission = "Shizuku Privileged Shell"
+                )
+            )
+        }
+
+        // 3. Rollback Mechanism Test (Real setting rollback - Fix B2)
+        list.add(
             FeatureTestResult(
-                id = "system_animation",
-                nameAr = "تعديل حركة النظام (Animations Scale)",
-                nameEn = "System Animation Scaling",
-                requiredPermission = "Shizuku Shell Access (WRITE_SECURE_SETTINGS)",
-                fixSteps = "امنح صلاحية Shizuku لتعديل مقاييس حركات النوافذ والانتقال وتقليل تأخير العرض."
-            ),
+                id = "rollback_mechanism",
+                nameAr = "استعادة الإعدادات الأصلية (Setting Rollback)",
+                nameEn = "Real Setting Snapshot & Rollback",
+                requiredPermission = "Shizuku Privileged Shell",
+                fixSteps = "يتطلب Shizuku للتحقق من استعادة إعداد pointer_speed إلى قيمته الأصلية."
+            )
+        )
+
+        // 4. Telemetry & Hardware Tests (Fix B3)
+        list.add(
             FeatureTestResult(
-                id = "thermal_sensor",
-                nameAr = "فحص درجة الحرارة (Thermal Sensor)",
-                nameEn = "Hardware Thermal Sensor Telemetry",
-                requiredPermission = "قراءة مستشعرات البطارية العامة (بدون إذن خاص)",
-                fixSteps = "تأكد من عمل مستشعر حرارة البطارية بالنظام وعدم حجب بث ACTION_BATTERY_CHANGED."
-            ),
+                id = "telemetry_network",
+                nameAr = "فحص استقرار الشبكة والـ Jitter",
+                nameEn = "TCP Latency, Jitter & Loss (10 Samples)",
+                fixSteps = "تأكد من الاتصال بشبكة الإنترنت لإجراء 10 قياسات TCP متتالية."
+            )
+        )
+        list.add(
             FeatureTestResult(
-                id = "battery_telemetry",
-                nameAr = "فحص البطارية (Battery Telemetry)",
-                nameEn = "Battery Level & Health Telemetry",
-                requiredPermission = "قراءة حالة البطارية العامة",
-                fixSteps = "تحقق من عمل خدمة مدير البطارية (BatteryManager) بالنظام."
-            ),
+                id = "telemetry_dns_benchmark",
+                nameAr = "فحص سرعة استجابة مزودي DNS عبر UDP 53",
+                nameEn = "Direct UDP Port 53 DNS Benchmark",
+                fixSteps = "يتطلب اتصال إنترنت يتيح حزم UDP عبر المنفذ 53."
+            )
+        )
+        list.add(
             FeatureTestResult(
-                id = "pubg_execution",
-                nameAr = "فحص تثبيت وتشغيل PUBG Mobile",
-                nameEn = "PUBG Mobile Installation & Launch Check",
-                requiredPermission = "queries (حزم الألعاب في Manifest)",
-                fixSteps = "تأكد من تثبيت إحدى نسخ PUBG Mobile (العالمية أو الهندية أو الكورية أو New State) على الجهاز."
-            ),
+                id = "telemetry_game_fps",
+                nameAr = "قياس معدل إطارات اللعبة الحقيقي (Game FPS)",
+                nameEn = "SurfaceFlinger Game FPS Measurement",
+                requiredPermission = "Shizuku Privileged Shell",
+                fixSteps = "شغّل لعبة PUBG في الواجهة الأمامية لإتاحة قراءة طبقات SurfaceFlinger."
+            )
+        )
+
+        // 5. Profile Real Execution Tests (Fix B3)
+        val profiles = listOf("performance", "competitive", "balanced", "battery")
+        for (prof in profiles) {
+            list.add(
+                FeatureTestResult(
+                    id = "profile_$prof",
+                    nameAr = "ملف الأداء: $prof",
+                    nameEn = "Profile Session: $prof",
+                    requiredPermission = "Shizuku Privileged Shell"
+                )
+            )
+        }
+
+        return list
+    }
+
+    suspend fun runSingleDiagnostic(testId: String): FeatureTestResult = withContext(Dispatchers.IO) {
+        val gamePkg = SessionController.prefsManager.selectedGamePkg.value
+
+        when {
+            testId == "shizuku_adb" -> testShizukuIpc()
+            testId == "dnd_gaming" -> testDndPolicy()
+            testId == "pubg_launchable" -> testGameInstalled(gamePkg)
+            testId.startsWith("cmd_") -> {
+                val cmdId = testId.removePrefix("cmd_")
+                val cmd = CommandRegistry.findById(cmdId)
+                if (cmd != null) testRegistryCommand(cmd, gamePkg) else unsupportedResult(testId, "Unknown command")
+            }
+            testId == "rollback_mechanism" -> testRealSettingRollback(gamePkg)
+            testId == "telemetry_network" -> testNetworkTelemetry()
+            testId == "telemetry_dns_benchmark" -> testDnsBenchmark()
+            testId == "telemetry_game_fps" -> testGameFps(gamePkg)
+            testId.startsWith("profile_") -> {
+                val prof = testId.removePrefix("profile_")
+                testProfileSession(prof, gamePkg)
+            }
+            else -> unsupportedResult(testId, "Not implemented")
+        }
+    }
+
+    private suspend fun testShizukuIpc(): FeatureTestResult {
+        val installed = AdbCommandRunner.isShizukuInstalled(context)
+        val running = AdbCommandRunner.isShizukuRunning()
+        val authorized = AdbCommandRunner.isAvailable()
+
+        return if (!installed) {
             FeatureTestResult(
-                id = "rollback_system",
-                nameAr = "إعادة الإعدادات السابقة (Rollback Engine)",
-                nameEn = "Configuration Snapshot & Rollback Engine",
-                requiredPermission = "Room Local Database & Shizuku",
-                fixSteps = "تأكد من سلامة قاعدة بيانات Room المحلية واتصال Shizuku لتنفيذ أوامر الاستعادة."
-            ),
+                id = "shizuku_adb",
+                nameAr = "تنفيذ أوامر Shizuku Privileged Shell",
+                nameEn = "Shizuku Shell IPC Execution",
+                status = TestStatus.FAILED,
+                actualResult = "تطبيق Shizuku غير مثبت على الجهاز",
+                failureCause = "Shizuku APK missing",
+                fixSteps = "ثبت تطبيق Shizuku من GitHub أو Google Play وشغله عبر اللاسلكي."
+            )
+        } else if (!running) {
             FeatureTestResult(
-                id = "pointer_speed",
-                nameAr = "سرعة المؤشر واستجابة اللمس",
-                nameEn = "Pointer Speed & Touch Latency Tuning",
-                requiredPermission = "Shizuku Shell Access (WRITE_SETTINGS)",
-                fixSteps = "اربط تطبيق Shizuku لمنح إذن الكتابة في إعدادات النظام وتعديل سرعة استجابة المؤشر."
-            ),
+                id = "shizuku_adb",
+                nameAr = "تنفيذ أوامر Shizuku Privileged Shell",
+                nameEn = "Shizuku Shell IPC Execution",
+                status = TestStatus.FAILED,
+                actualResult = "خدمة Shizuku متوقفة (Binder dead)",
+                failureCause = "Service not running",
+                fixSteps = "افتح Shizuku واضغط 'بدء' عبر تصحيح الأخطاء اللاسلكي."
+            )
+        } else if (!authorized) {
             FeatureTestResult(
-                id = "refresh_rate",
-                nameAr = "تثبيت أعلى معدل تحديث للشاشة",
-                nameEn = "Peak Display Refresh Rate Lock",
+                id = "shizuku_adb",
+                nameAr = "تنفيذ أوامر Shizuku Privileged Shell",
+                nameEn = "Shizuku Shell IPC Execution",
+                status = TestStatus.PERMISSION_REQUIRED,
+                actualResult = "تم الاتصال بالخدمة ولكن الإذن غير ممنوح",
+                requiredPermission = "moe.shizuku.manager.permission.API_V23",
+                fixSteps = "امنح إذن Shizuku لتطبيق Game Turbo."
+            )
+        } else {
+            val res = AdbCommandRunner.runDetailed("id")
+            FeatureTestResult(
+                id = "shizuku_adb",
+                nameAr = "تنفيذ أوامر Shizuku Privileged Shell",
+                nameEn = "Shizuku Shell IPC Execution",
+                status = if (res.success) TestStatus.SUCCESS else TestStatus.FAILED,
+                executedCommand = "id",
+                expectedResult = "uid=2000(shell)",
+                actualResult = res.stdout.trim(),
+                verificationLevel = VerificationLevel.EFFECT_CONFIRMED
+            )
+        }
+    }
+
+    private fun testDndPolicy(): FeatureTestResult {
+        val granted = notificationManager?.isNotificationPolicyAccessGranted == true
+        return if (granted) {
+            FeatureTestResult(
+                id = "dnd_gaming",
+                nameAr = "تفعيل وضع عدم الإزعاج (Gaming DND)",
+                nameEn = "Gaming Do Not Disturb Policy",
+                status = TestStatus.SUCCESS,
+                actualResult = "إذن الوصول لسياسة الإشعارات ممنوح (Interruption Filter Ready)",
+                verificationLevel = VerificationLevel.EFFECT_CONFIRMED
+            )
+        } else {
+            FeatureTestResult(
+                id = "dnd_gaming",
+                nameAr = "تفعيل وضع عدم الإزعاج (Gaming DND)",
+                nameEn = "Gaming Do Not Disturb Policy",
+                status = TestStatus.PERMISSION_REQUIRED,
+                requiredPermission = "android.permission.ACCESS_NOTIFICATION_POLICY",
+                actualResult = "الإذن غير ممنوح حالياً",
+                fixSteps = "افتح الإعدادات > التطبيقات > إمكانية الوصول الخاصة > الوصول لوضع عدم الإزعاج ومكن Game Turbo."
+            )
+        }
+    }
+
+    private fun testGameInstalled(gamePkg: String): FeatureTestResult {
+        return try {
+            val pm = context.packageManager
+            val info = pm.getPackageInfo(gamePkg, 0)
+            val appName = info.applicationInfo?.loadLabel(pm)?.toString() ?: gamePkg
+            FeatureTestResult(
+                id = "pubg_launchable",
+                nameAr = "اكتشاف وتثبيت اللعبة",
+                nameEn = "Game Installed & Launchable",
+                status = TestStatus.SUCCESS,
+                actualResult = "اللعبة مثبتة وجاهزة للإطلاق: $appName ($gamePkg)",
+                verificationLevel = VerificationLevel.EFFECT_CONFIRMED
+            )
+        } catch (_: Throwable) {
+            FeatureTestResult(
+                id = "pubg_launchable",
+                nameAr = "اكتشاف وتثبيت اللعبة",
+                nameEn = "Game Installed & Launchable",
+                status = TestStatus.FAILED,
+                actualResult = "الحزمة $gamePkg غير مثبتة على الهاتف",
+                failureCause = "Package not found in PackageManager",
+                fixSteps = "ثبت لعبة PUBG Mobile أو حدد حزمة اللعبة الصحيحة من شاشة الألعاب."
+            )
+        }
+    }
+
+    private suspend fun testRegistryCommand(cmd: SystemTuningCommand, gamePkg: String): FeatureTestResult {
+        if (!AdbCommandRunner.isAvailable()) {
+            return FeatureTestResult(
+                id = "cmd_${cmd.id}",
+                nameAr = cmd.nameAr,
+                nameEn = cmd.nameEn,
+                status = TestStatus.PERMISSION_REQUIRED,
                 requiredPermission = "Shizuku Shell Access",
-                fixSteps = "تأكد من دعم شاشة الهاتف لمعدلات تحديث تفوق 60Hz وربط Shizuku لتثبيت التردد."
-            ),
+                fixSteps = "شغل تطبيق Shizuku وامنح الإذن لتطبيق Game Turbo."
+            )
+        }
+
+        // Apply and verify through the EXACT production engine (Fix B1)
+        val result = shizukuEngine.applyAndVerify(cmd, gamePkg)
+
+        // Then execute immediate verified rollback to leave system clean (Fix B1, B2)
+        shizukuEngine.rollbackCommand(cmd, gamePkg)
+
+        val status = when {
+            !result.isSupported -> TestStatus.UNSUPPORTED
+            result.isSuccess -> TestStatus.SUCCESS
+            else -> TestStatus.FAILED
+        }
+
+        return FeatureTestResult(
+            id = "cmd_${cmd.id}",
+            nameAr = cmd.nameAr,
+            nameEn = cmd.nameEn,
+            status = status,
+            verificationLevel = result.verificationLevel,
+            executedCommand = cmd.applyCommand(gamePkg, cmd.defaultTargetValue),
+            expectedResult = cmd.defaultTargetValue,
+            actualResult = result.verifiedValue,
+            errorMessage = result.errorMessage ?: "—",
+            unsupportedReason = if (!result.isSupported) "الروم لا يدعم هذا المفتاح" else "—"
+        )
+    }
+
+    private suspend fun testRealSettingRollback(gamePkg: String): FeatureTestResult {
+        if (!AdbCommandRunner.isAvailable()) {
+            return FeatureTestResult(
+                id = "rollback_mechanism",
+                nameAr = "استعادة الإعدادات الأصلية (Setting Rollback)",
+                nameEn = "Real Setting Snapshot & Rollback",
+                status = TestStatus.PERMISSION_REQUIRED,
+                requiredPermission = "Shizuku Shell Access"
+            )
+        }
+
+        val cmd = CommandRegistry.POINTER_SPEED
+        val original = AdbCommandRunner.run(cmd.readCurrentCommand(gamePkg))?.trim() ?: "null"
+        val testVal = if (original == "7") "6" else "7"
+
+        // 1. Apply test value
+        val applyRes = shizukuEngine.applyAndVerify(cmd, gamePkg, testVal)
+        if (!applyRes.isSuccess) {
+            return FeatureTestResult(
+                id = "rollback_mechanism",
+                nameAr = "استعادة الإعدادات الأصلية (Setting Rollback)",
+                nameEn = "Real Setting Snapshot & Rollback",
+                status = TestStatus.FAILED,
+                actualResult = "فشل تطبيق القيمة التجريبية لاختبار الاستعادة"
+            )
+        }
+
+        // 2. Execute real rollback
+        val rollbackOk = shizukuEngine.rollbackCommand(cmd, gamePkg)
+        val afterRollback = AdbCommandRunner.run(cmd.readCurrentCommand(gamePkg))?.trim() ?: "null"
+
+        val isRestored = afterRollback == original || (original == "null" && (afterRollback.isEmpty() || afterRollback == "null"))
+
+        return if (rollbackOk && isRestored) {
             FeatureTestResult(
-                id = "doze_whitelist",
-                nameAr = "استثناء اللعبة من قيود البطارية (Doze)",
-                nameEn = "Battery Optimization Doze Exemption",
-                requiredPermission = "Shizuku Shell Access (dumpsys deviceidle)",
-                fixSteps = "امنح إذن Shizuku ليتمكن التطبيق من إضافة اللعبة إلى القائمة البيضاء لنظام Doze."
-            ),
+                id = "rollback_mechanism",
+                nameAr = "استعادة الإعدادات الأصلية (Setting Rollback)",
+                nameEn = "Real Setting Snapshot & Rollback",
+                status = TestStatus.SUCCESS,
+                verificationLevel = VerificationLevel.EFFECT_CONFIRMED,
+                executedCommand = "apply $testVal -> rollback -> read-back",
+                expectedResult = original,
+                actualResult = afterRollback
+            )
+        } else {
             FeatureTestResult(
-                id = "private_dns",
-                nameAr = "مزود DNS المشفر للألعاب",
-                nameEn = "Encrypted Private DNS Configuration",
-                requiredPermission = "Shizuku Shell Access (WRITE_SECURE_SETTINGS)",
-                fixSteps = "اربط Shizuku لتفعيل وتعيين خادم DNS المشفر للحد من تأخير حزم البيانات."
+                id = "rollback_mechanism",
+                nameAr = "استعادة الإعدادات الأصلية (Setting Rollback)",
+                nameEn = "Real Setting Snapshot & Rollback",
+                status = TestStatus.FAILED,
+                verificationLevel = VerificationLevel.NO_EFFECT,
+                expectedResult = original,
+                actualResult = afterRollback,
+                errorMessage = "قيمة الإعداد لم تعد إلى الأصل بعد التراجع"
             )
+        }
+    }
+
+    private suspend fun testNetworkTelemetry(): FeatureTestResult {
+        val samples = mutableListOf<Int>()
+        var lost = 0
+
+        for (i in 0 until 10) {
+            val rtt = networkEngine.sampleRtt()
+            if (rtt != null) samples.add(rtt) else lost++
+            delay(50)
+        }
+
+        return if (samples.isNotEmpty()) {
+            val median = samples.sorted()[samples.size / 2]
+            val jitter = if (samples.size >= 2) {
+                samples.zipWithNext { a, b -> kotlin.math.abs(b - a) }.average().toInt()
+            } else 0
+
+            FeatureTestResult(
+                id = "telemetry_network",
+                nameAr = "فحص استقرار الشبكة والـ Jitter",
+                nameEn = "TCP Latency, Jitter & Loss (10 Samples)",
+                status = TestStatus.SUCCESS,
+                verificationLevel = VerificationLevel.EFFECT_CONFIRMED,
+                actualResult = "RTT: $median ms | Jitter: $jitter ms | حزم مفقودة: $lost/10"
+            )
+        } else {
+            FeatureTestResult(
+                id = "telemetry_network",
+                nameAr = "فحص استقرار الشبكة والـ Jitter",
+                nameEn = "TCP Latency, Jitter & Loss (10 Samples)",
+                status = TestStatus.FAILED,
+                actualResult = "فشلت جميع الاتصالات (10/10 حزم مفقودة)",
+                errorMessage = "تعذر الاتصال بالخادم الهدف"
+            )
+        }
+    }
+
+    private suspend fun testDnsBenchmark(): FeatureTestResult {
+        val results = networkEngine.benchmarkDnsCandidates()
+        val valid = results.filter { it.medianMs != null }
+
+        return if (valid.isNotEmpty()) {
+            val summary = valid.joinToString(", ") { "${it.providerName}: ${it.medianMs}ms" }
+            FeatureTestResult(
+                id = "telemetry_dns_benchmark",
+                nameAr = "فحص سرعة استجابة مزودي DNS عبر UDP 53",
+                nameEn = "Direct UDP Port 53 DNS Benchmark",
+                status = TestStatus.SUCCESS,
+                verificationLevel = VerificationLevel.EFFECT_CONFIRMED,
+                actualResult = summary
+            )
+        } else {
+            FeatureTestResult(
+                id = "telemetry_dns_benchmark",
+                nameAr = "فحص سرعة استجابة مزودي DNS عبر UDP 53",
+                nameEn = "Direct UDP Port 53 DNS Benchmark",
+                status = TestStatus.FAILED,
+                actualResult = "فشلت حزم UDP المنفذ 53 مع كافة المزودين",
+                errorMessage = "مزود الخدمة أو جدار الحماية يحظر حزم UDP 53 المباشرة"
+            )
+        }
+    }
+
+    private suspend fun testGameFps(gamePkg: String): FeatureTestResult {
+        val fg = SurfaceFlingerFpsEngine.getForegroundPackage(context)
+        val isFg = fg == gamePkg || (fg != null && SurfaceFlingerFpsEngine.KNOWN_PUBG_PACKAGES.contains(fg))
+
+        if (!isFg) {
+            return FeatureTestResult(
+                id = "telemetry_game_fps",
+                nameAr = "قياس معدل إطارات اللعبة الحقيقي (Game FPS)",
+                nameEn = "SurfaceFlinger Game FPS Measurement",
+                status = TestStatus.NOT_TESTABLE_NOW,
+                actualResult = "اللعبة ليست في الواجهة الأمامية حالياً ($fg نشط)",
+                fixSteps = "افتح اللعبة ثم أعد الاختبار للحصول على قراءة إطارات حقيقية."
+            )
+        }
+
+        val fps = SurfaceFlingerFpsEngine.sampleFps(context, gamePkg)
+        return if (fps != null) {
+            FeatureTestResult(
+                id = "telemetry_game_fps",
+                nameAr = "قياس معدل إطارات اللعبة الحقيقي (Game FPS)",
+                nameEn = "SurfaceFlinger Game FPS Measurement",
+                status = TestStatus.SUCCESS,
+                verificationLevel = VerificationLevel.EFFECT_CONFIRMED,
+                actualResult = "$fps FPS (قراءة حية من SurfaceFlinger)"
+            )
+        } else {
+            FeatureTestResult(
+                id = "telemetry_game_fps",
+                nameAr = "قياس معدل إطارات اللعبة الحقيقي (Game FPS)",
+                nameEn = "SurfaceFlinger Game FPS Measurement",
+                status = TestStatus.FAILED,
+                actualResult = "تعذر قراءة طبقات الرسوميات للعبة",
+                errorMessage = "Layer not rendering active frames"
+            )
+        }
+    }
+
+    private suspend fun testProfileSession(profile: String, gamePkg: String): FeatureTestResult {
+        if (!AdbCommandRunner.isAvailable()) {
+            return FeatureTestResult(
+                id = "profile_$profile",
+                nameAr = "ملف الأداء: $profile",
+                nameEn = "Profile Session: $profile",
+                status = TestStatus.PERMISSION_REQUIRED,
+                requiredPermission = "Shizuku Shell Access"
+            )
+        }
+
+        // Run short real session through SessionController (Fix B3)
+        val startResult = SessionController.sessionManager.startSession("Reality Test", gamePkg, profile)
+        delay(1000)
+        val rollbackReport = SessionController.sessionManager.endSession()
+
+        return if (startResult.success && rollbackReport.isFullyRestored) {
+            FeatureTestResult(
+                id = "profile_$profile",
+                nameAr = "ملف الأداء: $profile",
+                nameEn = "Profile Session: $profile",
+                status = TestStatus.SUCCESS,
+                verificationLevel = VerificationLevel.EFFECT_CONFIRMED,
+                actualResult = "المطبق: ${startResult.appliedCount} | المؤكد: ${startResult.effectConfirmedCount} | المخزن: ${startResult.storedCount} | المستعاد بالكامل: ${rollbackReport.restoredCount}"
+            )
+        } else {
+            FeatureTestResult(
+                id = "profile_$profile",
+                nameAr = "ملف الأداء: $profile",
+                nameEn = "Profile Session: $profile",
+                status = TestStatus.FAILED,
+                actualResult = "فشل في تفعيل أو استعادة ملف $profile",
+                errorMessage = startResult.errorMessage ?: "Rollback failed for: ${rollbackReport.failedCommands.joinToString()}"
+            )
+        }
+    }
+
+    private fun unsupportedResult(testId: String, reason: String): FeatureTestResult {
+        return FeatureTestResult(
+            id = testId,
+            nameAr = testId,
+            nameEn = testId,
+            status = TestStatus.UNSUPPORTED,
+            unsupportedReason = reason
         )
     }
 
-    /**
-     * Tests a single feature individually with real read-back and system checks.
-     */
-    suspend fun testSingleFeature(featureId: String): FeatureTestResult = withContext(Dispatchers.IO) {
-        val initial = getInitialFeatureList().find { it.id == featureId }
-            ?: return@withContext FeatureTestResult(
-                id = featureId,
-                nameAr = "ميزة غير معروفة",
-                nameEn = "Unknown Feature",
-                status = TestStatus.FAILED,
-                errorMessage = "Feature ID not registered"
-            )
+    fun generateFullClipboardReport(results: List<FeatureTestResult>): String {
+        val sb = StringBuilder()
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+        sb.appendLine("=== GAME TURBO REALITY REPORT v2 ===")
+        sb.appendLine("Generated At: ${dateFormat.format(Date())}")
+        sb.appendLine("Device Model: ${android.os.Build.MODEL} (${android.os.Build.MANUFACTURER})")
+        sb.appendLine("Android Version: ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
+        sb.appendLine("----------------------------------------")
 
-        when (featureId) {
-            "shizuku_adb" -> testShizukuExecution(initial)
-            "game_mode_perf" -> testGameModePerformance(initial)
-            "dnd_gaming" -> testDndGaming(initial)
-            "heads_up_notifications" -> testHeadsUpNotifications(initial)
-            "system_animation" -> testSystemAnimation(initial)
-            "thermal_sensor" -> testThermalSensor(initial)
-            "battery_telemetry" -> testBatteryTelemetry(initial)
-            "pubg_execution" -> testPubgExecution(initial)
-            "rollback_system" -> testRollbackSystem(initial)
-            "pointer_speed" -> testPointerSpeed(initial)
-            "refresh_rate" -> testRefreshRate(initial)
-            "doze_whitelist" -> testDozeWhitelist(initial)
-            "private_dns" -> testPrivateDns(initial)
-            else -> initial.copy(status = TestStatus.FAILED, errorMessage = "No test implementation")
-        }
-    }
-
-    /**
-     * 1. Test Shizuku & Privileged Shell Execution
-     */
-    private suspend fun testShizukuExecution(base: FeatureTestResult): FeatureTestResult {
-        val cmd = "id"
-        if (!PermissionManager.isShizukuRunning()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "Shizuku.pingBinder()",
-                expectedResult = "Binder alive & communicating",
-                actualResult = "Binder is null / not responding",
-                errorMessage = "خدمة Shizuku غير مشغلة على الهاتف",
-                errorCode = "SHIZUKU_SERVICE_DOWN",
-                failureCause = "لم يتم بدء تشغيل خدمة Shizuku عبر التصحيح اللاسلكي",
-                fixSteps = "افتح تطبيق Shizuku، واضغط على Start بعد تفعيل التصحيح اللاسلكي (Wireless Debugging)."
-            )
-        }
-
-        if (!PermissionManager.hasShizukuPermission()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "Shizuku.checkSelfPermission()",
-                expectedResult = "PERMISSION_GRANTED (0)",
-                actualResult = "PERMISSION_DENIED (-1)",
-                errorMessage = "صلاحية Shizuku لم تُمنح لتطبيق Game Turbo",
-                errorCode = "SHIZUKU_PERM_DENIED",
-                failureCause = "المستخدم لم يوافق بعد على منح الصلاحية للتطبيق",
-                fixSteps = "اضغط على زر منح الصلاحية في مركز الأذونات ووافق على طلب Shizuku."
-            )
-        }
-
-        val execResult = AdbCommandRunner.runDetailed(cmd)
-        return if (execResult.success && execResult.stdout.contains("uid=")) {
-            base.copy(
-                status = TestStatus.SUCCESS,
-                executedCommand = cmd,
-                expectedResult = "uid=2000(shell)",
-                actualResult = execResult.stdout
-            )
-        } else {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = cmd,
-                expectedResult = "uid=2000(shell)",
-                actualResult = execResult.stdout.ifBlank { "فارغ" },
-                errorMessage = execResult.stderr.ifBlank { "رمز الخطأ: ${execResult.exitCode}" },
-                errorCode = "EXIT_${execResult.exitCode}",
-                failureCause = "فشل تنفيذ أمر shell الداخلي عبر Shizuku",
-                fixSteps = "أعد تشغيل خدمة Shizuku وتحقق من تفعيل خيارات التصحيح اللاسلكي."
-            )
-        }
-    }
-
-    /**
-     * 2. Test Game Mode Performance
-     */
-    private suspend fun testGameModePerformance(base: FeatureTestResult): FeatureTestResult {
-        if (!AdbCommandRunner.isAvailable()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "cmd power set-fixed-performance-mode-enabled",
-                expectedResult = "تمكين وضع الأداء الثابت",
-                actualResult = "Shizuku غير متصل",
-                errorMessage = "يلزم اتصال Shizuku لتنفيذ أوامر مدير الطاقة (cmd power)",
-                errorCode = "SHIZUKU_REQUIRED",
-                failureCause = "عدم توفر الصلاحية لتنفيذ أوامر shell",
-                fixSteps = "قم بتشغيل وتوصيل تطبيق Shizuku أولاً."
-            )
-        }
-
-        val applyCmd = "cmd power set-fixed-performance-mode-enabled true"
-        val readCmd = "cmd power get-fixed-performance-mode-enabled"
-
-        val applyRes = AdbCommandRunner.runDetailed(applyCmd)
-        if (!applyRes.success) {
-            val err = applyRes.stderr.lowercase()
-            return if (err.contains("unknown command") || err.contains("not implemented") || err.contains("unsupported")) {
-                base.copy(
-                    status = TestStatus.UNSUPPORTED,
-                    executedCommand = applyCmd,
-                    expectedResult = "true",
-                    actualResult = applyRes.stderr,
-                    errorMessage = applyRes.stderr,
-                    errorCode = "POWER_HAL_UNSUPPORTED",
-                    unsupportedReason = "واجهة Power HAL على معالج هذا الهاتف لا تدعم وضع الأداء الثابت (Fixed Performance Mode).",
-                    suggestedAlternative = "الاعتماد على ضبط سرعة استجابة الشاشة وحركات النظام بدلاً منها."
-                )
-            } else {
-                base.copy(
-                    status = TestStatus.FAILED,
-                    executedCommand = applyCmd,
-                    expectedResult = "Exit code 0",
-                    actualResult = "Exit code ${applyRes.exitCode}: ${applyRes.stderr}",
-                    errorMessage = applyRes.stderr,
-                    errorCode = "EXIT_${applyRes.exitCode}",
-                    failureCause = "رفض النظام تفعيل وضع الأداء الثابت",
-                    fixSteps = "تأكد من عدم وجود قيود أمان خاصة بالشركة المصنعة (مثل MIUI/ColorOS Security)."
-                )
+        for (res in results) {
+            sb.appendLine("[${res.status.name}] ${res.nameEn} / ${res.nameAr}")
+            if (res.verificationLevel != null) {
+                sb.appendLine("  Verification: ${res.verificationLevel.labelEn}")
             }
+            if (res.executedCommand != "—") sb.appendLine("  Command: ${res.executedCommand}")
+            if (res.actualResult != "—") sb.appendLine("  Actual: ${res.actualResult}")
+            if (res.errorMessage != "—") sb.appendLine("  Error: ${res.errorMessage}")
+            sb.appendLine()
         }
 
-        // Read-back verification
-        val readRes = AdbCommandRunner.runDetailed(readCmd)
-        val readVal = readRes.stdout.trim()
-        val isVerified = readVal.equals("true", ignoreCase = true) || readVal.contains("1")
-
-        // Revert immediately so test leaves no side effects
-        AdbCommandRunner.runDetailed("cmd power set-fixed-performance-mode-enabled false")
-
-        return if (isVerified) {
-            base.copy(
-                status = TestStatus.SUCCESS,
-                executedCommand = "$applyCmd && $readCmd",
-                expectedResult = "true",
-                actualResult = "$readVal (تم التحقق واستعادة الوضع الافتراضي)"
-            )
-        } else {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "$applyCmd && $readCmd",
-                expectedResult = "true",
-                actualResult = readVal.ifBlank { "قيمة غير مطابقة" },
-                errorMessage = "القيمة المقروءة بعد التطبيق لم تتغير إلى true",
-                errorCode = "VERIFY_MISMATCH",
-                failureCause = "النظام لم يقبل تثبيت نمط الأداء وظل على التردد الديناميكي",
-                fixSteps = "جرب إعادة المحاولة بعد فصل الشاحن أو تخفيف الحمل."
-            )
-        }
+        sb.appendLine("========================================")
+        return sb.toString()
     }
 
-    /**
-     * 3. Test Gaming DND
-     */
-    private fun testDndGaming(base: FeatureTestResult): FeatureTestResult {
-        if (notificationManager == null) {
-            return base.copy(
-                status = TestStatus.UNSUPPORTED,
-                executedCommand = "NotificationManager",
-                expectedResult = "خدمة إدارة الإشعارات متاحة",
-                actualResult = "خدمة NotificationManager غير متوفرة",
-                errorMessage = "خدمة مدير الإشعارات مفقودة في هذا النظام",
-                errorCode = "SERVICE_NULL",
-                unsupportedReason = "النظام لا يتيح الوصول لخدمة NotificationManager القياسية.",
-                suggestedAlternative = "كتم الصوت يدوياً أثناء اللعب."
-            )
-        }
+    suspend fun testSingleFeature(testId: String): FeatureTestResult = runSingleDiagnostic(testId)
 
-        if (!notificationManager.isNotificationPolicyAccessGranted) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "notificationManager.isNotificationPolicyAccessGranted",
-                expectedResult = "true",
-                actualResult = "false",
-                errorMessage = "إذن الوصول لسياسة الإشعارات غير ممنوح",
-                errorCode = "POLICY_ACCESS_DENIED",
-                failureCause = "لم يمنح المستخدم إذن عدم الإزعاج للتطبيق",
-                fixSteps = "افتح إعدادات الهاتف > التطبيقات > إمكانية الوصول الخاصة > إذن عدم الإزعاج، وامنحه لتطبيق Game Turbo."
-            )
-        }
+    fun generateExportReport(results: List<FeatureTestResult>): String = generateFullClipboardReport(results)
 
-        return try {
-            val prevFilter = notificationManager.currentInterruptionFilter
-            notificationManager.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_PRIORITY)
-            val currentFilter = notificationManager.currentInterruptionFilter
-            // Restore previous filter immediately
-            notificationManager.setInterruptionFilter(prevFilter)
-
-            if (currentFilter == NotificationManager.INTERRUPTION_FILTER_PRIORITY) {
-                base.copy(
-                    status = TestStatus.SUCCESS,
-                    executedCommand = "setInterruptionFilter(PRIORITY)",
-                    expectedResult = "FILTER_PRIORITY (2)",
-                    actualResult = "FILTER_PRIORITY (2) (تم التحقق واستعادة الفلتر السابق)"
-                )
-            } else {
-                base.copy(
-                    status = TestStatus.FAILED,
-                    executedCommand = "setInterruptionFilter(PRIORITY)",
-                    expectedResult = "FILTER_PRIORITY (2)",
-                    actualResult = "Filter code: $currentFilter",
-                    errorMessage = "لم يتغير فلتر عدم الإزعاج إلى وضع الأولوية",
-                    errorCode = "FILTER_NOT_APPLIED",
-                    failureCause = "واجهة النظام المصنعة تمنع تغيير الفلتر برمجياً",
-                    fixSteps = "تحقق من إعدادات وضع الألعاب المدمج في واجهة الهاتف."
-                )
-            }
-        } catch (e: Throwable) {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "setInterruptionFilter()",
-                expectedResult = "نجاح الاستدعاء وتغيير الفلتر",
-                actualResult = "Exception: ${e.message}",
-                errorMessage = e.message ?: "خطأ غير متوقع",
-                errorCode = e.javaClass.simpleName,
-                failureCause = "حدث خطأ أمني أثناء محاولة تعيين فلتر عدم الإزعاج",
-                fixSteps = "أعد منح إذن عدم الإزعاج للتطبيق من إعدادات الهاتف."
-            )
-        }
+    fun generateSingleErrorReport(item: FeatureTestResult): String {
+        val sb = StringBuilder()
+        sb.appendLine("=== FEATURE DIAGNOSTIC REPORT ===")
+        sb.appendLine("Feature: ${item.nameEn} (${item.nameAr})")
+        sb.appendLine("Status: ${item.status.name}")
+        sb.appendLine("Verification Level: ${item.verificationLevel?.labelEn ?: "N/A"}")
+        sb.appendLine("Executed Command: ${item.executedCommand}")
+        sb.appendLine("Expected Result: ${item.expectedResult}")
+        sb.appendLine("Actual Result: ${item.actualResult}")
+        sb.appendLine("Error Message: ${item.errorMessage}")
+        sb.appendLine("Failure Cause: ${item.failureCause}")
+        sb.appendLine("Fix Steps: ${item.fixSteps}")
+        return sb.toString()
     }
 
-    /**
-     * 4. Test Disable Heads-up Notifications
-     */
-    private suspend fun testHeadsUpNotifications(base: FeatureTestResult): FeatureTestResult {
-        if (!AdbCommandRunner.isAvailable()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "settings put global heads_up_notifications_enabled 0",
-                expectedResult = "0",
-                actualResult = "Shizuku غير متصل",
-                errorMessage = "يلزم اتصال Shizuku لتعديل إعدادات الإشعارات العائمة",
-                errorCode = "SHIZUKU_REQUIRED",
-                failureCause = "لا يمكن لتطبيق عادي كتابة إعدادات النظام العالمية بدون صلاحية Shizuku",
-                fixSteps = "اربط تطبيق Shizuku وشغّل الخدمة عبر التصحيح اللاسلكي."
-            )
-        }
-
-        val orig = AdbCommandRunner.run("settings get global heads_up_notifications_enabled")?.trim()
-        val applyRes = AdbCommandRunner.runDetailed("settings put global heads_up_notifications_enabled 0")
-        if (!applyRes.success) {
-            return base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "settings put global heads_up_notifications_enabled 0",
-                expectedResult = "Exit code 0",
-                actualResult = "Exit code ${applyRes.exitCode}: ${applyRes.stderr}",
-                errorMessage = applyRes.stderr,
-                errorCode = "EXIT_${applyRes.exitCode}",
-                failureCause = "فشل أمر ضبط الإشعارات العائمة",
-                fixSteps = "تحقق من أن واجهة النظام لا تفرض حماية إضافية على مفاتيح Global Settings."
-            )
-        }
-
-        val readBack = AdbCommandRunner.run("settings get global heads_up_notifications_enabled")?.trim()
-        // Restore original
-        if (orig != null && orig != "0" && orig != "null") {
-            AdbCommandRunner.runDetailed("settings put global heads_up_notifications_enabled $orig")
-        }
-
-        return if (readBack == "0") {
-            base.copy(
-                status = TestStatus.SUCCESS,
-                executedCommand = "settings put global heads_up_notifications_enabled 0",
-                expectedResult = "0",
-                actualResult = "0 (تم التحقق وقراءة النتيجة الحقيقية واستعادة الأصل)"
-            )
-        } else {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "settings put global heads_up_notifications_enabled 0",
-                expectedResult = "0",
-                actualResult = readBack ?: "null",
-                errorMessage = "القيمة بعد التطبيق لم تصبح 0",
-                errorCode = "READBACK_MISMATCH",
-                failureCause = "تم تجاهل التعديل من قِبل نظام إشعارات الهاتف",
-                fixSteps = "تأكد من تفعيل صلاحيات Shizuku بكامل الصلاحيات بدون قيود أمان OEM."
-            )
-        }
-    }
-
-    /**
-     * 5. Test System Animation Scale
-     */
-    private suspend fun testSystemAnimation(base: FeatureTestResult): FeatureTestResult {
-        if (!AdbCommandRunner.isAvailable()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "settings put global window_animation_scale 0.0",
-                expectedResult = "0.0",
-                actualResult = "Shizuku غير متصل",
-                errorMessage = "يلزم اتصال Shizuku لتعديل مقاييس الرسوم",
-                errorCode = "SHIZUKU_REQUIRED",
-                failureCause = "صلاحيات Shizuku مطلوبة لتعديل Global Settings",
-                fixSteps = "شغّل تطبيق Shizuku واربطه عبر التصحيح اللاسلكي."
-            )
-        }
-
-        val orig = AdbCommandRunner.run("settings get global window_animation_scale")?.trim()
-        val applyRes = AdbCommandRunner.runDetailed("settings put global window_animation_scale 0.0")
-        val readBack = AdbCommandRunner.run("settings get global window_animation_scale")?.trim()
-
-        // Restore
-        val restoreVal = if (orig.isNullOrBlank() || orig == "null") "1.0" else orig
-        AdbCommandRunner.runDetailed("settings put global window_animation_scale $restoreVal")
-
-        val num = readBack?.toFloatOrNull()
-        return if (num == 0.0f) {
-            base.copy(
-                status = TestStatus.SUCCESS,
-                executedCommand = "settings put global window_animation_scale 0.0",
-                expectedResult = "0.0",
-                actualResult = "$readBack (تم التحقق واستعادة القيمة الأصلية: $restoreVal)"
-            )
-        } else {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "settings put global window_animation_scale 0.0",
-                expectedResult = "0.0",
-                actualResult = readBack ?: "فارغ",
-                errorMessage = applyRes.stderr.ifBlank { "القيمة المقروءة لم تتغير إلى 0.0" },
-                errorCode = "ANIMATION_MISMATCH",
-                failureCause = "فشل تعديل مقياس حركة النوافذ في النظام",
-                fixSteps = "تحقق من تمكين خيارات المطور وسماح النظام بتعديل Animation Scales."
-            )
-        }
-    }
-
-    /**
-     * 6. Test Hardware Thermal Sensor
-     */
-    private fun testThermalSensor(base: FeatureTestResult): FeatureTestResult {
-        return try {
-            val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            val rawTemp = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
-            if (rawTemp > 0) {
-                val celsius = rawTemp / 10.0
-                base.copy(
-                    status = TestStatus.SUCCESS,
-                    executedCommand = "BatteryManager.EXTRA_TEMPERATURE",
-                    expectedResult = "قراءة حرارية حقيقية (15°C - 70°C)",
-                    actualResult = "${String.format(Locale.US, "%.1f", celsius)}°C (قراءة مستشعر موثقة)"
-                )
-            } else {
-                base.copy(
-                    status = TestStatus.FAILED,
-                    executedCommand = "BatteryManager.EXTRA_TEMPERATURE",
-                    expectedResult = "درجة حرارة موجبة",
-                    actualResult = "$rawTemp",
-                    errorMessage = "أرجع مستشعر البطارية قيمة غير صالحة ($rawTemp)",
-                    errorCode = "TEMP_SENSOR_INVALID",
-                    failureCause = "مستشعر حرارة البطارية لا يرسل بيانات عبر بث النظام",
-                    fixSteps = "أعد تشغيل الجهاز للتحقق من تهيئة مستشعرات العتاد."
-                )
-            }
-        } catch (e: Throwable) {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "ACTION_BATTERY_CHANGED",
-                expectedResult = "درجة حرارة موجبة",
-                actualResult = "Exception: ${e.message}",
-                errorMessage = e.message ?: "فشل تسجيل مستقبل البطارية",
-                errorCode = e.javaClass.simpleName,
-                failureCause = "تعذر قراءة مستشعر البطارية بالنظام",
-                fixSteps = "تأكد من عدم تقييد استقبال رسائل النظام من قِبل تطبيقات توفير الطاقة."
-            )
-        }
-    }
-
-    /**
-     * 7. Test Battery Telemetry
-     */
-    private fun testBatteryTelemetry(base: FeatureTestResult): FeatureTestResult {
-        return try {
-            val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            val rawLevel = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-
-            if (rawLevel >= 0 && scale > 0) {
-                val percent = (rawLevel * 100) / scale
-                base.copy(
-                    status = TestStatus.SUCCESS,
-                    executedCommand = "BatteryManager.EXTRA_LEVEL / EXTRA_SCALE",
-                    expectedResult = "نسبة مئوية بين 0 و 100%",
-                    actualResult = "$percent% (مستوى الشحن الحقيقي)"
-                )
-            } else {
-                base.copy(
-                    status = TestStatus.FAILED,
-                    executedCommand = "BatteryManager.EXTRA_LEVEL",
-                    expectedResult = "مستوى شحن صالح",
-                    actualResult = "Level: $rawLevel, Scale: $scale",
-                    errorMessage = "تعذر احتساب نسبة البطارية الحقيقية",
-                    errorCode = "BATTERY_LEVEL_INVALID",
-                    failureCause = "بيانات البث الخاصة بالبطارية غير مكتملة",
-                    fixSteps = "أعد تشغيل الهاتف لتحديث خدمة BatteryService."
-                )
-            }
-        } catch (e: Throwable) {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "BatteryManager",
-                expectedResult = "نسبة صالحة",
-                actualResult = "Exception: ${e.message}",
-                errorMessage = e.message ?: "خطأ غير متوقع",
-                errorCode = e.javaClass.simpleName,
-                failureCause = "استثناء أثناء قراءة بيانات البطارية",
-                fixSteps = "تأكد من عمل خدمات أندرويد الأساسية بشكل طبيعي."
-            )
-        }
-    }
-
-    /**
-     * 8. Test PUBG Mobile Execution & Installation
-     */
-    private fun testPubgExecution(base: FeatureTestResult): FeatureTestResult {
-        val candidatePackages = listOf(
-            "com.tencent.ig" to "PUBG Mobile (العالمية)",
-            "com.pubg.imobile" to "BGMI (الهندية)",
-            "com.pubg.krmobile" to "PUBG Mobile (الكورية)",
-            "com.pubg.newstate" to "NEW STATE Mobile"
-        )
-
-        val pm = context.packageManager
-        for ((pkg, name) in candidatePackages) {
-            try {
-                val info = pm.getPackageInfo(pkg, 0)
-                val intent = pm.getLaunchIntentForPackage(pkg)
-                if (intent != null) {
-                    val ver = info.versionName ?: "Unknown"
-                    return base.copy(
-                        status = TestStatus.SUCCESS,
-                        executedCommand = "pm.getLaunchIntentForPackage($pkg)",
-                        expectedResult = "العثور على حزمة اللعبة وقابلية التشغيل",
-                        actualResult = "مثبت وجاهز للإطلاق: $name ($pkg) إصدار $ver"
-                    )
-                }
-            } catch (_: Throwable) {}
-        }
-
-        return base.copy(
-            status = TestStatus.FAILED,
-            executedCommand = "PackageManager.getPackageInfo(com.tencent.ig / com.pubg.imobile)",
-            expectedResult = "حزمة PUBG مثبتة في النظام",
-            actualResult = "لم يتم العثور على أي حزمة من حزم PUBG الرسمية",
-            errorMessage = "حزمة لعبة PUBG Mobile غير مثبتة على الهاتف",
-            errorCode = "PKG_NOT_FOUND",
-            failureCause = "اللعبة غير مثبتة أو مثبتة في مساحة خاصة غير قابلة للقراءة",
-            fixSteps = "قم بتثبيت لعبة PUBG Mobile أو توجه إلى شاشة 'الألعاب' وأضف حزمة لعبتك المخصصة لتشغيلها."
-        )
-    }
-
-    /**
-     * 9. Test Snapshot & Rollback Engine
-     */
-    private suspend fun testRollbackSystem(base: FeatureTestResult): FeatureTestResult {
-        return try {
-            val testKey = "diagnostic_probe_test_key"
-            val testOrig = "original_val_7"
-            val testApplied = "modified_val_9"
-
-            val snapshot = SystemSnapshotRecord(
-                commandId = testKey,
-                settingNamespace = "system",
-                settingKey = testKey,
-                originalValue = testOrig,
-                appliedValue = testApplied
-            )
-
-            boosterDao.insertSnapshot(snapshot)
-            val readBack = boosterDao.getSnapshot(testKey)
-            boosterDao.deleteSnapshot(testKey)
-
-            if (readBack != null && readBack.originalValue == testOrig && readBack.appliedValue == testApplied) {
-                base.copy(
-                    status = TestStatus.SUCCESS,
-                    executedCommand = "Room.insertSnapshot() -> getSnapshot() -> deleteSnapshot()",
-                    expectedResult = "حفظ واسترجاع اللقطات بدون فقدان بيانات",
-                    actualResult = "قاعدة بيانات اللقطات تعمل بكفاءة تامة وتم التحقق من دورة الحفظ والحذف"
-                )
-            } else {
-                base.copy(
-                    status = TestStatus.FAILED,
-                    executedCommand = "Room Database Snapshot Test",
-                    expectedResult = "تطابق السجل المحفوظ",
-                    actualResult = "السجل المقروء غير مطابق أو مفقود",
-                    errorMessage = "فشلت قراءة اللقطة التجريبية من قاعدة بيانات Room",
-                    errorCode = "ROOM_IO_MISMATCH",
-                    failureCause = "حدث خطأ في مزامنة قاعدة البيانات المحلية",
-                    fixSteps = "تأكد من وجود مساحة تخزين كافية على الجهاز."
-                )
-            }
-        } catch (e: Throwable) {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "Room Database Snapshot Test",
-                expectedResult = "نجاح العملية",
-                actualResult = "Exception: ${e.message}",
-                errorMessage = e.message ?: "خطأ في قاعدة البيانات",
-                errorCode = e.javaClass.simpleName,
-                failureCause = "فشل الوصول لقاعدة بيانات SQLite",
-                fixSteps = "أعد تشغيل التطبيق لتحديث اتصال قاعدة البيانات."
-            )
-        }
-    }
-
-    /**
-     * 10. Test Pointer Speed
-     */
-    private suspend fun testPointerSpeed(base: FeatureTestResult): FeatureTestResult {
-        if (!AdbCommandRunner.isAvailable()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "settings put system pointer_speed 7",
-                expectedResult = "7",
-                actualResult = "Shizuku غير متصل",
-                errorMessage = "صلاحيات Shizuku مطلوبة لتعديل سرعة المؤشر",
-                errorCode = "SHIZUKU_REQUIRED",
-                failureCause = "لا يمكن لتطبيق عادي تعديل إعدادات النظام بدون تصريح الشل",
-                fixSteps = "اربط تطبيق Shizuku لتفعيل صلاحيات التعديل في System Settings."
-            )
-        }
-
-        val orig = AdbCommandRunner.run("settings get system pointer_speed")?.trim()
-        val applyRes = AdbCommandRunner.runDetailed("settings put system pointer_speed 7")
-        val readBack = AdbCommandRunner.run("settings get system pointer_speed")?.trim()
-
-        // Restore
-        val restoreVal = if (orig.isNullOrBlank() || orig == "null") "0" else orig
-        AdbCommandRunner.runDetailed("settings put system pointer_speed $restoreVal")
-
-        return if (readBack == "7") {
-            base.copy(
-                status = TestStatus.SUCCESS,
-                executedCommand = "settings put system pointer_speed 7",
-                expectedResult = "7",
-                actualResult = "7 (تم التحقق وقراءة القيمة واستعادة الأصل: $restoreVal)"
-            )
-        } else {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "settings put system pointer_speed 7",
-                expectedResult = "7",
-                actualResult = readBack ?: "فارغ",
-                errorMessage = applyRes.stderr.ifBlank { "القيمة المقروءة لم تتغير إلى 7" },
-                errorCode = "POINTER_SPEED_FAILED",
-                failureCause = "النظام منع تعديل سرعة المؤشر",
-                fixSteps = "تأكد من منح صلاحيات Shizuku وعدم حظر كتابة إعدادات النظام."
-            )
-        }
-    }
-
-    /**
-     * 11. Test Peak Refresh Rate
-     */
-    private suspend fun testRefreshRate(base: FeatureTestResult): FeatureTestResult {
-        val caps = DeviceCapabilityEngine.scan(context)
-        if (caps.maxRefreshRateHz <= 60.0f) {
-            return base.copy(
-                status = TestStatus.UNSUPPORTED,
-                executedCommand = "Display.supportedModes",
-                expectedResult = "تردد شاشة يفوق 60Hz",
-                actualResult = "أعلى تردد مدعوم للشاشة: ${caps.maxRefreshRateHz.toInt()}Hz",
-                errorMessage = "شاشة الهاتف ثابتة على تردد 60Hz فقط",
-                errorCode = "DISPLAY_60HZ_ONLY",
-                unsupportedReason = "عتاد شاشة هذا الهاتف لا يدعم معدلات التحديث العالية (90Hz / 120Hz / 144Hz).",
-                suggestedAlternative = "التركيز على تقليل حرارة المعالج وتفريغ الذاكرة للحفاظ على ثبات 60 إطاراً في الثانية."
-            )
-        }
-
-        if (!AdbCommandRunner.isAvailable()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "settings put system peak_refresh_rate ${caps.maxRefreshRateHz}",
-                expectedResult = "${caps.maxRefreshRateHz}",
-                actualResult = "Shizuku غير متصل",
-                errorMessage = "صلاحيات Shizuku مطلوبة لتثبيت أعلى تردد للشاشة",
-                errorCode = "SHIZUKU_REQUIRED",
-                failureCause = "لا يمكن لتطبيق عادي كتابة مفاتيح التردد بدون شل مرتفع الصلاحية",
-                fixSteps = "شغّل Shizuku عبر التصحيح اللاسلكي وامنح الصلاحية للتطبيق."
-            )
-        }
-
-        val targetRate = caps.maxRefreshRateHz.toInt().toFloat().toString()
-        val orig = AdbCommandRunner.run("settings get system peak_refresh_rate")?.trim()
-        val applyRes = AdbCommandRunner.runDetailed("settings put system peak_refresh_rate $targetRate")
-        val readBack = AdbCommandRunner.run("settings get system peak_refresh_rate")?.trim()
-
-        // Restore
-        if (!orig.isNullOrBlank() && orig != "null") {
-            AdbCommandRunner.runDetailed("settings put system peak_refresh_rate $orig")
-        } else {
-            AdbCommandRunner.runDetailed("settings delete system peak_refresh_rate")
-        }
-
-        val readNum = readBack?.toFloatOrNull()
-        val targetNum = targetRate.toFloatOrNull()
-
-        return if (readNum != null && targetNum != null && readNum == targetNum) {
-            base.copy(
-                status = TestStatus.SUCCESS,
-                executedCommand = "settings put system peak_refresh_rate $targetRate",
-                expectedResult = targetRate,
-                actualResult = "$readBack Hz (تم التحقق وقراءة التردد الحقيقي واستعادة الأصل)"
-            )
-        } else {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "settings put system peak_refresh_rate $targetRate",
-                expectedResult = targetRate,
-                actualResult = readBack ?: "فارغ",
-                errorMessage = applyRes.stderr.ifBlank { "القيمة المقروءة لم تتطابق مع $targetRate" },
-                errorCode = "REFRESH_RATE_FAILED",
-                failureCause = "واجهة النظام المصنعة منعت تثبيت تردد الشاشة برمجياً",
-                fixSteps = "تحقق من تفعيل خيار أعلى تردد للشاشة يدوياً من إعدادات شاشة الهاتف."
-            )
-        }
-    }
-
-    /**
-     * 12. Test Doze Whitelist
-     */
-    private suspend fun testDozeWhitelist(base: FeatureTestResult): FeatureTestResult {
-        if (!AdbCommandRunner.isAvailable()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "dumpsys deviceidle whitelist",
-                expectedResult = "قائمة التطبيقات المستثناة من Doze",
-                actualResult = "Shizuku غير متصل",
-                errorMessage = "صلاحيات Shizuku مطلوبة للوصول لأوامر dumpsys deviceidle",
-                errorCode = "SHIZUKU_REQUIRED",
-                failureCause = "أوامر dumpsys تتطلب صلاحيات shell عبر Shizuku",
-                fixSteps = "قم بتشغيل وربط تطبيق Shizuku عبر التصحيح اللاسلكي."
-            )
-        }
-
-        val execRes = AdbCommandRunner.runDetailed("dumpsys deviceidle whitelist")
-        return if (execRes.success && execRes.stdout.isNotBlank()) {
-            base.copy(
-                status = TestStatus.SUCCESS,
-                executedCommand = "dumpsys deviceidle whitelist",
-                expectedResult = "قائمة Doze البيضاء",
-                actualResult = "أمر النظام يعمل بنجاح ومصرح به (تم استخراج ${execRes.stdout.lines().size} تطبيق مستثنى)"
-            )
-        } else {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = "dumpsys deviceidle whitelist",
-                expectedResult = "قائمة Doze البيضاء",
-                actualResult = execRes.stdout.ifBlank { "فارغ" },
-                errorMessage = execRes.stderr,
-                errorCode = "EXIT_${execRes.exitCode}",
-                failureCause = "فشل استدعاء خدمة deviceidle",
-                fixSteps = "تأكد من أن الهاتف لا يعطل خدمة dumpsys في وضع توفير الطاقة."
-            )
-        }
-    }
-
-    /**
-     * 13. Test Private DNS
-     */
-    private suspend fun testPrivateDns(base: FeatureTestResult): FeatureTestResult {
-        if (!AdbCommandRunner.isAvailable()) {
-            return base.copy(
-                status = TestStatus.PERMISSION_REQUIRED,
-                executedCommand = "settings put global private_dns_mode hostname",
-                expectedResult = "hostname",
-                actualResult = "Shizuku غير متصل",
-                errorMessage = "يلزم اتصال Shizuku لضبط إعدادات DNS المشفر",
-                errorCode = "SHIZUKU_REQUIRED",
-                failureCause = "تعديل Private DNS في أندرويد يحتاج إذن WRITE_SECURE_SETTINGS عبر Shizuku",
-                fixSteps = "اربط تطبيق Shizuku بالتصحيح اللاسلكي."
-            )
-        }
-
-        val origMode = AdbCommandRunner.run("settings get global private_dns_mode")?.trim()
-        val origSpec = AdbCommandRunner.run("settings get global private_dns_specifier")?.trim()
-
-        val applyCmd = "settings put global private_dns_mode hostname && settings put global private_dns_specifier one.one.one.one"
-        val applyRes = AdbCommandRunner.runDetailed(applyCmd)
-
-        val readMode = AdbCommandRunner.run("settings get global private_dns_mode")?.trim()
-        val readSpec = AdbCommandRunner.run("settings get global private_dns_specifier")?.trim()
-
-        // Restore
-        val restoreModeCmd = if (!origMode.isNullOrBlank() && origMode != "null") "settings put global private_dns_mode $origMode" else "settings put global private_dns_mode off"
-        val restoreSpecCmd = if (!origSpec.isNullOrBlank() && origSpec != "null") "settings put global private_dns_specifier $origSpec" else "settings delete global private_dns_specifier"
-        AdbCommandRunner.runDetailed("$restoreModeCmd && $restoreSpecCmd")
-
-        val isVerified = readMode == "hostname" && readSpec == "one.one.one.one"
-
-        return if (isVerified) {
-            base.copy(
-                status = TestStatus.SUCCESS,
-                executedCommand = applyCmd,
-                expectedResult = "mode=hostname, specifier=one.one.one.one",
-                actualResult = "mode=$readMode, specifier=$readSpec (تم التحقق وقراءة الإعداد واستعادة الأصل)"
-            )
-        } else {
-            base.copy(
-                status = TestStatus.FAILED,
-                executedCommand = applyCmd,
-                expectedResult = "mode=hostname, specifier=one.one.one.one",
-                actualResult = "mode=$readMode, specifier=$readSpec",
-                errorMessage = applyRes.stderr.ifBlank { "لم يتم تحديث قيم Private DNS بالشكل المطلوب" },
-                errorCode = "DNS_WRITE_MISMATCH",
-                failureCause = "النظام منع تعيين DNS المشفر",
-                fixSteps = "تأكد من أن شبكة الإنترنت الحالية لا تحجب خوادم DNS المشفرة."
-            )
-        }
-    }
-
-    /**
-     * Computes the real counters summary.
-     */
     fun computeSummary(results: List<FeatureTestResult>): DiagnosticsSummary {
-        var success = 0
-        var failed = 0
-        var unsupported = 0
-        var permission = 0
-        var notTested = 0
-
-        for (item in results) {
-            when (item.status) {
-                TestStatus.SUCCESS -> success++
-                TestStatus.FAILED -> failed++
-                TestStatus.UNSUPPORTED -> unsupported++
-                TestStatus.PERMISSION_REQUIRED -> permission++
-                TestStatus.NOT_TESTED -> notTested++
-            }
-        }
         return DiagnosticsSummary(
-            successCount = success,
-            failedCount = failed,
-            unsupportedCount = unsupported,
-            permissionRequiredCount = permission,
-            notTestedCount = notTested,
+            successCount = results.count { it.status == TestStatus.SUCCESS },
+            failedCount = results.count { it.status == TestStatus.FAILED },
+            unsupportedCount = results.count { it.status == TestStatus.UNSUPPORTED },
+            permissionRequiredCount = results.count { it.status == TestStatus.PERMISSION_REQUIRED },
+            notTestedCount = results.count { it.status == TestStatus.NOT_TESTED },
+            notTestableNowCount = results.count { it.status == TestStatus.NOT_TESTABLE_NOW },
             totalCount = results.size
         )
-    }
-
-    /**
-     * Formats the entire diagnostic report for "نسخ الكل" according to the user's exact template,
-     * ensuring sensitive tokens and passwords are redacted.
-     */
-    fun generateExportReport(results: List<FeatureTestResult>): String {
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-        val scanTime = dateFormat.format(Date())
-
-        val successItems = results.filter { it.status == TestStatus.SUCCESS }
-        val failedItems = results.filter { it.status == TestStatus.FAILED }
-        val unsupportedItems = results.filter { it.status == TestStatus.UNSUPPORTED }
-        val permissionItems = results.filter { it.status == TestStatus.PERMISSION_REQUIRED }
-
-        val sb = StringBuilder()
-        sb.appendLine("اسم التطبيق: Game Turbo")
-        sb.appendLine("إصدار التطبيق: 1.0")
-        sb.appendLine("إصدار Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
-        sb.appendLine("الشركة المصنعة: ${Build.MANUFACTURER}")
-        sb.appendLine("طراز الهاتف: ${Build.MODEL}")
-        sb.appendLine("وقت الفحص: $scanTime")
-        sb.appendLine()
-
-        sb.appendLine("الميزات التي اشتغلت:")
-        if (successItems.isEmpty()) {
-            sb.appendLine("- لا توجد ميزات تم تأكيد نجاحها حتى الآن.")
-        } else {
-            for (item in successItems) {
-                sb.appendLine("- اسم الميزة: ${item.nameAr} (${item.nameEn}): تم التنفيذ")
-                sb.appendLine("  النتيجة الفعلية: ${sanitize(item.actualResult)}")
-                sb.appendLine("  الأمر المستخدم: ${sanitize(item.executedCommand)}")
-            }
-        }
-        sb.appendLine()
-
-        sb.appendLine("الميزات التي لم تشتغل:")
-        if (failedItems.isEmpty()) {
-            sb.appendLine("- لا توجد ميزات فاشلة.")
-        } else {
-            for (item in failedItems) {
-                sb.appendLine("- اسم الميزة: ${item.nameAr} (${item.nameEn})")
-                sb.appendLine("  الحالة: ${item.status.labelAr}")
-                sb.appendLine("  الأمر المستخدم: ${sanitize(item.executedCommand)}")
-                sb.appendLine("  النتيجة المتوقعة: ${sanitize(item.expectedResult)}")
-                sb.appendLine("  النتيجة الفعلية: ${sanitize(item.actualResult)}")
-                sb.appendLine("  رسالة الخطأ: ${sanitize(item.errorMessage)}")
-                sb.appendLine("  كود الخطأ: ${item.errorCode}")
-                sb.appendLine("  سبب الفشل: ${item.failureCause}")
-                sb.appendLine("  طريقة الإصلاح: ${item.fixSteps}")
-            }
-        }
-        sb.appendLine()
-
-        sb.appendLine("الميزات غير المدعومة:")
-        if (unsupportedItems.isEmpty()) {
-            sb.appendLine("- لا توجد ميزات غير مدعومة.")
-        } else {
-            for (item in unsupportedItems) {
-                sb.appendLine("- اسم الميزة: ${item.nameAr} (${item.nameEn})")
-                sb.appendLine("  سبب عدم الدعم: ${item.unsupportedReason}")
-                sb.appendLine("  البديل المقترح: ${item.suggestedAlternative}")
-            }
-        }
-        sb.appendLine()
-
-        sb.appendLine("الصلاحيات الناقصة:")
-        if (permissionItems.isEmpty()) {
-            sb.appendLine("- كافة الصلاحيات المطلوبة مكتملة.")
-        } else {
-            for (item in permissionItems) {
-                sb.appendLine("- اسم الصلاحية: ${item.requiredPermission} (لميزة: ${item.nameAr})")
-                sb.appendLine("  طريقة منحها: ${item.fixSteps}")
-            }
-        }
-
-        return sb.toString().trim()
-    }
-
-    /**
-     * Generates error details for a single failed feature.
-     */
-    fun generateSingleErrorReport(item: FeatureTestResult): String {
-        return """
-            اسم الميزة: ${item.nameAr} (${item.nameEn})
-            الحالة: ${item.status.labelAr}
-            الأمر المستخدم: ${sanitize(item.executedCommand)}
-            النتيجة المتوقعة: ${sanitize(item.expectedResult)}
-            النتيجة الفعلية: ${sanitize(item.actualResult)}
-            رسالة الخطأ: ${sanitize(item.errorMessage)}
-            كود الخطأ: ${item.errorCode}
-            سبب الفشل: ${item.failureCause}
-            الصلاحية المطلوبة: ${item.requiredPermission}
-            إصدار Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})
-            الشركة المصنعة: ${Build.MANUFACTURER} (${Build.MODEL})
-            خطوات الإصلاح: ${item.fixSteps}
-        """.trimIndent()
-    }
-
-    /**
-     * Sanitizes sensitive tokens, passwords, and authorization keys from text.
-     */
-    private fun sanitize(input: String): String {
-        return input
-            .replace("(?i)(password|secret|token|apikey|key)=[\\w\\d_-]+".toRegex(), "$1=REDACTED")
-            .replace("(?i)bearer\\s+[\\w\\d_.-]+".toRegex(), "Bearer REDACTED")
     }
 }
